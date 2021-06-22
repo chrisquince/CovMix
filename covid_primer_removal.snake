@@ -1,0 +1,532 @@
+from scripts.common import fill_default_values, detect_reads, extended_glob, assess_samples
+from os.path import abspath, realpath, dirname, basename, exists, getsize
+from Bio.SeqIO.QualityIO import FastqGeneralIterator as fgi
+from Bio.SeqIO.FastaIO import SimpleFastaParser as sfp
+from collections import defaultdict
+import numpy as np
+import glob
+import gzip
+import sys
+import os
+
+
+
+# get defaults values 
+fill_default_values(config)
+
+# -------- Ressources --------
+THREADS = config["threads"]
+SCRIPTS = config["scripts"]
+CONFIG_PATH = config["CONFIG_PATH"]
+REPOS_DIR = config["REPOS_DIR"]
+EXEC_DIR = config["EXEC_DIR"]
+
+# -------- References/DB --------
+PRIMER = config["PRIMER"]
+DB_REF = "%s/primer_schemes/%s/%s_reference.fasta"%(REPOS_DIR,PRIMER,PRIMER) # ref for reference, basically the genome used for primer definition
+DB_PRIMER = "%s/primer_schemes/%s/%s_primer.bed"%(REPOS_DIR,PRIMER,PRIMER)
+DB_REP = config["database"]["fasta"] # rep for representatives, basically the covid genomes database
+
+# !!!ISSUE!!! currently dependent on artic type amplicon naming scheme, not sure how to adapt to general naming scheme. 
+AMPLICONS = {line.rstrip().split("\t")[3].split("_RIGHT")[0].split("_LEFT")[0] for line in open(DB_PRIMER)}
+
+# -------- Additional parameters --------
+TRIMMING_LEVEL = config["trimming_strictness"]
+THRESHOLD = config["Proportion_Threshold"]
+DB_TREE = config["database"]["tree"]
+DB_TREE_REL = config["database"]["tree_rel"]
+DB_AMP = config["database"]["amplicons"]
+MAX_READS = config["max_reads_per_amp"]
+MIN_READS = config["min_reads_per_amp"]
+
+# if PRIMER=="Artic_V3":
+#     MIN_AMP = 90
+# else:
+#     MIN_AMP = 140
+# not really usefull parameter anymore, used for reference filtering before
+MIN_AMP = 0
+
+# -------- Database --------
+# we make the assumption that the database contain the sequence used for defining primer
+# if it's not in, we add it.
+refname,refseq = next(sfp(open(DB_REF))) 
+if not refname in {header for header,seq in sfp(open(DB_REP))}:
+    new_db = "%s/refs/genomes_database.fa"%EXEC_DIR
+    os.system("mkdir -p %s/refs"%EXEC_DIR)
+    os.system("cat %s %s > %s"%(DB_REP,DB_REF,new_db))
+    DB_REP = new_db
+
+
+
+# -------- filtering --------
+
+# default is to run all amplicons
+if config["amplicon_to_run"]:
+    DB_RUN_A = config["amplicon_to_run"]
+else:
+    os.system("mkdir -p %s/refs"%EXEC_DIR)
+    DB_RUN_A = "%s/refs/aSelect.tsv"%EXEC_DIR
+    with open(DB_RUN_A,"w") as handle:
+        handle.writelines("%s\n"%el.split("_")[-1] for el in AMPLICONS)
+
+# default is to run all genomes
+if config["genome_to_run"]:
+    DB_RUN_G = config["genome_to_run"]
+else:
+    DB_RUN_G = "%s/refs/gSelect.tsv"%EXEC_DIR
+    with open(DB_RUN_G,"w") as handle:
+        handle.writelines("%s\n"%header.split(" ")[0] for header,_ in sfp(open(DB_REP)))
+
+
+# -------- Samples --------
+SAMPLE_DIR = config["data"]
+try : 
+    REGEX = config["data_regex"]
+except:
+    REGEX = ["*"]
+
+SAMPLES = {basename(file):detect_reads(file) for regex in REGEX for file in extended_glob("%s/%s"%(SAMPLE_DIR,regex))}
+
+
+# check there is only 1 R1 and 1 R2 per folder
+assess_samples(SAMPLES)
+R1 = {sample:files["_R1" in files[1]] for sample,files in SAMPLES.items()}
+R2 = {sample:files["_R2" in files[1]] for sample,files in SAMPLES.items()}
+
+# -------- misc python utils --------
+def matrix_write(matrix,file_name,row_names,col_names) :
+    with open(file_name,"w") as handle:
+        handle.write("/\t%s\n"%"\t".join(col_names))
+        handle.writelines('%s\t%s\n'%(row_names[index],"\t".join(["{0:4g}".format(nb) for nb in line])) for index,line in enumerate(matrix))
+
+# --------------------------------------------------
+# ---------------- Snakemake start! ----------------
+# --------------------------------------------------
+
+
+rule results:
+    input: expand("%s/results/{fig}.pdf"%EXEC_DIR,fig = ["Proportions","amplicons_wise_freq","tree_freq","amplicon_wise_read_cnt"]),
+           "%s/results/proportions.tsv"%EXEC_DIR
+
+wildcard_constraints:
+    amp =".+(?<!total)",
+
+# --------------- cut refferences amplicon-wise ------------------------
+# strategy to fill up missing amplicons 
+rule mafft_tree:
+    threads: THREADS
+    output:"%s/refs/tree/db_mafft.msa"%(EXEC_DIR)
+    shell: "mafft --auto --thread {threads} {DB_REP} > {output}"
+
+rule iqtree_building:
+    input: "%s/refs/tree/db_mafft.msa"%(EXEC_DIR)
+    params : "%s/refs/tree/db_tree.nwk"%EXEC_DIR
+    output: DB_TREE
+    log: "%s/refs/tree/iqtree.log"%EXEC_DIR
+    threads:THREADS
+    shell:"""
+          iqtree -s {input} -m GTR+G -blmin 1e-9 -nt AUTO -ntmax {threads}  > {log}
+          mv {input}.treefile {output}
+          """
+
+rule nearest_relatives:
+    input: DB_TREE
+    output: DB_TREE_REL
+    threads: THREADS
+    shell: "{SCRIPTS}/tabulate_relatives.py -t {threads} {input} {output}"
+
+# build amplicon wise database
+rule extract_amplicons:
+    # input: DB_TREE_REL
+    output: expand("%s/{amp}.fa"%DB_AMP,amp=AMPLICONS),
+            "%s/amp_name_mapping.tsv"%DB_AMP
+    shell: """
+        {SCRIPTS}/extract_amplicons.py {DB_PRIMER} {DB_REF} {DB_REP} {DB_AMP} -s {EXEC_DIR}/refs -m {MIN_AMP} """# --next_of_kin {input}
+#        """
+
+
+# just symlink all relevant files in the refs folder.
+rule create_tidy_ref_folder:
+    input:"%s/amp_name_mapping.tsv"%DB_AMP
+    output: "%s/refs/{PRIMER}_amps_seqs/tidy_done"%EXEC_DIR
+    shell:"""
+        mkdir -p {EXEC_DIR}/refs
+        ln -s {DB_PRIMER} {EXEC_DIR}/refs/
+        ln -s {DB_REF} {EXEC_DIR}/refs/        
+        if [ ! -f {EXEC_DIR}/refs/genomes_database.fa ]
+            then
+                ln -s {DB_REP} {EXEC_DIR}/refs/
+        fi
+        if [ ! -d {EXEC_DIR}/refs/{PRIMER}_amps_seqs ]
+        then
+            mkdir -p {EXEC_DIR}/refs/{PRIMER}_amps_seqs
+            ln -s {DB_AMP}/* {EXEC_DIR}/refs/{PRIMER}_amps_seqs/
+        fi
+        if [ ! -f {EXEC_DIR}/refs/tree/db_tree.nwk ]
+        then  
+            if [ -f {DB_TREE} ]
+            then
+                mkdir -p {EXEC_DIR}/refs/tree
+                ln -s {DB_TREE} {EXEC_DIR}/refs/tree/db_tree.nwk
+            fi
+        fi
+        if [ ! -f {EXEC_DIR}/refs/tree/db_tree_rel.tsv ]
+        then  
+            if [ -f {DB_TREE_REL} ]
+            then
+                ln -s {DB_TREE_REL} {EXEC_DIR}/refs/tree/db_tree_rel.tsv
+            fi
+        fi
+        touch {output}
+        """
+
+# --------------- use db to "clean" reads -----------------------
+# extract couple (pos,nuc) variant from database using primer definition genome as a ref
+rule mafft_amplicons:
+    input: "{path}.fa"
+    output: "{path}.msa"
+    threads: THREADS
+    shell:"""
+    mafft --thread {threads} {input} > {output} 2>/dev/null
+    """
+
+rule generate_snv_infos:
+    input: expand("{{path}}/%s_amps_seqs/{amp}.msa"%PRIMER,amp=AMPLICONS)
+    output: "{path}/db_variants_def.tsv"
+    shell:"{SCRIPTS}/extract_variants.py {DB_AMP} {DB_AMP}/amp_name_mapping.tsv {output} "
+
+
+
+# --------------- map reads to reference ------------------------
+
+rule index :
+    input: "{path}" 
+    output:"{path}.pac"
+    shell: "bwa index {input}"
+
+rule map_init:
+    input: "%s.pac"%DB_REF,
+           R1 = lambda w:R1[w.sample],
+           R2 = lambda w:R2[w.sample],
+    output: "{path}/{sample}/{sample}_init.sam"
+    shell:"bwa mem {DB_REF} {input.R1} {input.R2} | samtools sort - -o {output}"
+
+
+# !!!ISSUE!!! : this script depends on LEFT/RIGTH tags in the primer bed file...
+rule filt_sam :
+    input: sam = "{path}/{sample}/{sample}_init.sam",
+    params: "{path}/{sample}/amplicons_reads/{sample}",
+    log: "{path}/{sample}/trim.log"
+    output: files_R1 = expand("{{path}}/{{sample}}/amplicons_reads/{{sample}}_{amp}_{R}.fastq.gz",amp=AMPLICONS,R=["R1","R2"]),
+            amp_tabl = "{path}/{sample}/{sample}_amp_pair_cnt.tsv"
+    shell: """
+        cat {input.sam} | {SCRIPTS}/trim_primer_parts.py {DB_PRIMER} {DB_REF} {params} --table {output.amp_tabl} -s {TRIMMING_LEVEL} --log {log}
+        """
+
+rule cat_trimmed_files :
+    input: fq = expand("{{path}}/{{sample}}/amplicons_reads/{{sample}}_{amp}_{{R}}.fastq.gz",amp=AMPLICONS)
+    params: "{path}/{sample}/amplicons_reads/",
+    output: "{path}/{sample}/{sample}_trimmed_{R}.fastq.gz"
+    shell: """
+           cat {input.fq} > {output}
+           """
+
+rule map_trimmed:
+    input: R1 = "{path}/{sample}/{sample}_trimmed_R1.fastq.gz",
+           R2 = "{path}/{sample}/{sample}_trimmed_R2.fastq.gz",
+    output: "{path}/{sample}/{sample}_trimmed.sam"
+    shell:"bwa mem {DB_REF} {input.R1} {input.R2} | samtools sort - -o {output}"
+
+
+rule plot_cov :
+    input: "{path}/samples/{sample}/{sample}_init.sam",
+           "{path}/samples/{sample}/{sample}_trimmed.sam"
+    output: "{path}/samples/{sample}/amplicon_wise_read_cnt.pdf"
+    threads: 1
+    shell : "{SCRIPTS}/plot_depth.py -o {output} -i {input} -p {DB_PRIMER} -t {threads}"
+
+
+# --------------- Unmerged version of the pipeline  --------------------------
+
+# # --------------- check which amplicons should be run ------------------------
+
+# checkpoint assess_amp:
+#     input: cnts = expand("{{path}}/samples/{sample}/{sample}_amp_pair_cnt.tsv",sample=R1),
+#            tidy = "%s/refs/%s_amps_seqs/tidy_done"%(EXEC_DIR,PRIMER)
+#     output: selec = "{path}/selected_amp.tsv",
+#             cnt = "{path}/amp_cnts.tsv"
+#     run:
+#         nb_amp = len(AMPLICONS)
+#         sorted_amp = range(1,nb_amp+1)
+#         sorted_samples = sorted([basename(dirname(file)) for file in input])
+#         matrix = np.zeros((len(input),nb_amp))
+#         selected = defaultdict(list)
+#         for file in input["cnts"]:
+#             sample = basename(dirname(file))
+#             index_sample = sorted_samples.index(sample)
+#             if getsize(file)!=0:
+#                 for line in open(file):
+#                     amp,cnt = line.rstrip().split("\t")
+#                     amp = amp.split("_")[1]
+#                     selected[sample].append(amp)
+#                     index_amp = sorted_amp.index(int(amp))
+#                     matrix[index_sample,index_amp]=int(cnt)
+#         with open(output['selec'],"w") as handle:
+#             handle.writelines("%s\t%s\n"%(sample,"\t".join(amps)) for sample,amps in selected.items())
+#         matrix_write(matrix,output["cnt"],sorted_samples,map(str,sorted_amp))
+
+
+# # ---------------------- run vsearch ----------------------------
+# rule fastq_to_fasta:
+#     input: "{file}.fastq.gz"
+#     output: temp("{file}.fasta")
+#     shell: "seqtk seq -a {input} > {output}"
+
+
+# rule vsearch_all:
+#     input: R = "{path}_nCoV-2019_{amp}_{R}.fasta",
+#            db = "%s/nCoV-2019_{amp}.fa"%DB_AMP
+#     params: tmp = "{path}_{amp}_{R}.tmp",
+#             opt = lambda w:(w.R=="R2")*"--strand both"
+#     output: sam = "{path}_nCoV-2019_{amp}_{R}.sam",
+#             m6 = "{path}_nCoV-2019_{amp}_{R}.m6"
+#     shell: """
+#     sed 's/-//g' {input.db} > {params.tmp}
+#     sed -i 's/nCoV2019/nCoV-2019/g' {params.tmp}
+#     vsearch --usearch_global {input.R} --db {params.tmp} --samout {output.sam} --samheader --id 0.95 --maxaccepts 1000000 {params.opt} --userout {output.m6} --userfields query+target+evalue+id+pctgaps+pairs+gaps+qlo+qhi+tlo+thi+pv+ql+tl+qs+ts+alnlen+opens+exts+raw+bits+aln+caln+qrow+trow+mism+ids+qcov+tcov
+#     rm {params.tmp}
+#     """
+
+
+# # -------------------- Simple EM with error rate learning ------------------
+
+# rule get_read_len:
+#     input: "{path}/{sample}/{sample}_trimmed_{R}.fastq.gz"
+#     output:"{path}/{sample}/{sample}_{R}_readlen.len"
+#     run: 
+#         with open(output[0],"w") as handle:
+#             handle.writelines("%s\t%s\n"%(header,len(seq)) for header,seq,qual in fgi(gzip.open(input[0],'rt')))
+
+# # call checkpoint so that we can assess which amp to run during runtime.
+# def relevant_amp(w):
+#     file = checkpoints.assess_amp.get(path=w.path).output["selec"]
+#     return {line.rstrip().split("\t")[0]:line.rstrip().split("\t")[1:] for line in open(file)}
+
+# rule EM_aggregated:
+#     input: R1_m6 = lambda w:["%s/samples/%s/amplicons_reads/%s_nCoV-2019_%s_R1.m6"%(w.path,w.sample,w.sample,amp) for amp in relevant_amp(w)[w.sample]],
+#            R2_m6 = lambda w:["%s/samples/%s/amplicons_reads/%s_nCoV-2019_%s_R2.m6"%(w.path,w.sample,w.sample,amp) for amp in relevant_amp(w)[w.sample]],
+#            R1_len = "{path}/samples/{sample}/{sample}_R1_readlen.len",
+#            R2_len = "{path}/samples/{sample}/{sample}_R2_readlen.len",
+#            mapping = "%s/amp_name_mapping.tsv"%DB_AMP
+#     output: expand("{{path}}/samples/{{sample}}/EM_runs/{{sample}}_total{ext}.csv",ext=["_pi_est", "_delta_f_est", "_delta_r_est", "_z_est", "_amp_map"])
+#     params: tmp_R1 = "{path}/samples/{sample}/amplicons_reads/all_amp_R1.m6",
+#             tmp_R2 = "{path}/samples/{sample}/amplicons_reads/all_amp_R2.m6",
+#             out = "{path}/samples/{sample}/EM_runs/{sample}_total"
+#     shell: """
+#     cat {input.R1_m6} > {params.tmp_R1}
+#     cat {input.R2_m6} > {params.tmp_R2}
+#     python {SCRIPTS}/CovidEM_VIU.py {params.tmp_R1} {params.tmp_R2} {input.R1_len} {input.R2_len} {input.mapping} {params.out}
+#     rm {params.tmp_R1} {params.tmp_R2}
+#     """
+
+
+
+
+
+
+
+# -------------------------- merged version of the pipeline ----------------------
+
+checkpoint assess_amp_merged:
+    input: cnts = expand("{{path}}/samples/{sample}/{sample}_amp_pair_cnt.tsv",sample=R1),
+           merged = expand("{{path}}/samples/{sample}/amplicons_reads/{sample}_{amp}_merged.fasta",sample=R1,amp=AMPLICONS),
+           tidy = "%s/refs/%s_amps_seqs/tidy_done"%(EXEC_DIR,PRIMER)
+    output: selec = "{path}/selected_amp.tsv",
+            cnt = "{path}/results/amp_cnts.tsv"
+    run:
+        nb_amp = len(AMPLICONS)
+        sorted_amp = range(1,nb_amp+1)
+        sorted_samples = sorted([basename(dirname(file)) for file in input])
+        matrix = np.zeros((len(input),nb_amp))
+        selected = defaultdict(list)
+        for file in input["cnts"]:
+            sample = basename(dirname(file))
+            index_sample = sorted_samples.index(sample)
+            if getsize(file)!=0:
+                for line in open(file):
+                    amp,cnt = line.rstrip().split("\t")
+                    amp = amp.split("_")[1]
+                    merged = "%s/amplicons_reads/%s_nCoV-2019_%s_merged.fasta"%(dirname(file),sample,amp)
+                    nb_reads = len([h for h,_ in sfp(open(merged))])
+                    if nb_reads>=MIN_READS:
+                        selected[sample].append(amp)
+                    index_amp = sorted_amp.index(int(amp))
+                    matrix[index_sample,index_amp]=int(cnt)
+        ind_selected = np.array([sorted_samples.index(sample) for sample in selected])
+        selected_matrix = matrix[ind_selected,:]
+        selected_samples = np.array(sorted_samples)[ind_selected] 
+        with open(output['selec'],"w") as handle:
+            handle.writelines("%s\t%s\n"%(sample,"\t".join(amps)) for sample,amps in selected.items())
+        matrix_write(selected_matrix,output["cnt"],selected_samples,map(str,sorted_amp))
+
+
+# ---------------------- run vsearch ----------------------------
+
+rule vsearch_mergepair:
+    input: R1="{path}_R1.fastq.gz",
+           R2="{path}_R2.fastq.gz"
+    output:"{path}_merged.fasta"
+    shell:"vsearch --fastq_mergepairs {input.R1} --reverse {input.R2} --fastaout {output} || touch {output}"
+
+rule fastq_to_fasta:
+    input: "{file}.fastq.gz"
+    output: temp("{file}.fasta")
+    shell: "seqtk seq -a {input} > {output}"
+
+
+# rule vsearch_ref:
+#     input: R = "{path}_nCoV-2019_{amp}_{R}.fasta",
+#            db = "%s/reference_amp_seqs/nCoV-2019_{amp}.fa"%DB
+#     params: tmp = "{path}_{amp}_{R}.tmp",
+#             opt = lambda w:(w.R=="R2")*"--strand both"
+#     output: sam = "{path}_nCoV-2019_{amp}_{R}.sam",
+#             m6 = "{path}_nCoV-2019_{amp}_{R}.m6"
+#     shell: """
+#     sed 's/-//g' {input.db} > {params.tmp}
+#     sed -i 's/nCoV2019/nCoV-2019/g' {params.tmp}
+#     vsearch --usearch_global {input.R} --db {params.tmp} --samout {output.sam} --samheader --id 0.95 --maxaccepts 1000000 {params.opt} --userout {output.m6} --userfields query+target+evalue+id+pctgaps+pairs+gaps+qlo+qhi+tlo+thi+pv+ql+tl+qs+ts+alnlen+opens+exts+raw+bits+aln+caln+qrow+trow+mism+ids+qcov+tcov
+#     rm {params.tmp}
+#     """
+rule subsample_reads:
+    input: "{path}.fasta"
+    output: "{path}_F%s.fasta"%MAX_READS
+    shell: "seqtk sample -s42 {input} {MAX_READS} > {output}"
+
+rule vsearch_all_merged:
+    input: R = "{path}_nCoV-2019_{amp}_merged_F%s.fasta"%MAX_READS,
+           db = "%s/nCoV-2019_{amp}.fa"%DB_AMP,
+    params: tmp = "{path}_{amp}.tmp",
+    output: sam = "{path}_nCoV-2019_{amp}_merged.sam",
+            m6 = "{path}_nCoV-2019_{amp}_merged.m6"
+    shell: """
+    sed 's/-//g' {input.db} > {params.tmp}
+    sed -i 's/nCoV2019/nCoV-2019/g' {params.tmp}
+    vsearch --usearch_global {input.R} --db {params.tmp} --samout {output.sam} --samheader --id 0.95 --maxaccepts 1000000 --userout {output.m6} --userfields query+target+evalue+id+pctgaps+pairs+gaps+qlo+qhi+tlo+thi+pv+ql+tl+qs+ts+alnlen+opens+exts+raw+bits+aln+caln+qrow+trow+mism+ids+qcov+tcov
+    rm {params.tmp}
+    """
+
+
+#-------------------- schedule tasks ------------------
+#it seems with latest version that it is not possible to refer to checkpoints before the rule is written. 
+
+def relevant_amp(w):
+    file = checkpoints.assess_amp_merged.get(path=w.path).output["selec"]
+    return {line.rstrip().split("\t")[0]:line.rstrip().split("\t")[1:] for line in open(file)}
+
+
+# rule do_the_thing:
+#     input: lambda w:["%s/samples/%s/amplicons_reads/%s_nCoV-2019_%s_merged.m6"%(w.path,sample,sample,amp) for sample,amps in relevant_amp(w).items() for amp in amps]
+#     output: "{path}/done"
+#     shell: 'touch {output}'
+
+
+#-------------------- Simple EM with error rate learning ------------------
+rule cat_merged_m6:
+    input: fasta = lambda w:["%s/samples/%s/amplicons_reads/%s_nCoV-2019_%s_merged.fasta"%(w.path,w.sample,w.sample,amp) for amp in relevant_amp(w)[w.sample]],
+           m6 = lambda w:["%s/samples/%s/amplicons_reads/%s_nCoV-2019_%s_merged.m6"%(w.path,w.sample,w.sample,amp) for amp in relevant_amp(w)[w.sample]]
+    output: fasta = "{path}/samples/{sample}/{sample}_cat_merged.fasta",
+            m6 = temp("{path}/samples/{sample}/amplicons_reads/all_amp_merged.m6")
+    shell: """
+           cat {input.fasta} > {output.fasta}
+           cat {input.m6} > {output.m6}
+           """
+
+rule get_read_len:
+    input: "{path}_cat_merged.fasta"
+    output: "{path}_merged_readlen.len"
+    run: 
+        with open(output[0],"w") as handle:
+            handle.writelines("%s\t%s\n"%(header,len(seq)) for header,seq in sfp(open(input[0])))
+
+
+rule EMP_aggregated_merged:
+    input: m6 = "{path}/samples/{sample}/amplicons_reads/all_amp_merged.m6",
+           read_len = "{path}/samples/{sample}/{sample}_merged_readlen.len",
+           mapping = "%s/amp_name_mapping.tsv"%DB_AMP
+    output: expand("{{path}}/samples/{{sample}}/EM_runs/{{sample}}_total{ext}.csv",ext=["_pi_est", "_z_est","_amp_pi_est"])
+    params: out = "{path}/samples/{sample}/EM_runs/{sample}_total"
+    shell: """
+           python  {SCRIPTS}/CovidEM_VIN.py {input.m6} {input.read_len} {input.mapping} {params.out} -r {DB_RUN_G} -a {DB_RUN_A}
+           touch {output}
+           """
+
+
+# -------------------- Schedule tasks ------------------
+# in snakemake, I can't request something which directly depend on checkpoints : 
+# because checkpoint has to be called passing snakemake wildcards as argument
+# instead I create this bogus rule so that i can pass a wildcard with the correct "path" field
+
+rule schedule: 
+    input: lambda w:["%s/samples/%s/EM_runs/%s_total%s.csv"%(w.path,sample,sample,ext) for ext in ["_pi_est", "_z_est","_amp_pi_est"] for sample in relevant_amp(w)]
+    output: "{path}/done"
+    shell: "touch {output}"
+
+ruleorder: plot_proportions>plot_cov >plot_freq_tree>plot_Amplicons> merge_pdf
+
+# -------------------- create a results figs ------------------
+rule plot_proportions:
+    input : "{path}/samples/{sample}/EM_runs/{sample}_total_pi_est.csv"
+    output: "{path}/samples/{sample}/Proportions.pdf"
+    shell:"{SCRIPTS}/plot_proportions.R {input} {THRESHOLD} {output}"
+
+rule plot_Amplicons:
+    input : "{path}/samples/{sample}/EM_runs/{sample}_total_amp_pi_est.csv"
+    output: "{path}/samples/{sample}/amplicons_wise_freq.pdf"
+    shell:"{SCRIPTS}/AmpZZ.R {input} {output}"
+
+rule plot_freq_tree:
+    input : pi = "{path}/samples/{sample}/EM_runs/{sample}_total_pi_est.csv",
+            tree = DB_TREE
+    output: "{path}/samples/{sample}/tree_freq.pdf"
+    shell:"{SCRIPTS}/plot_tree.R {input.pi} {input.tree} {output}"
+
+# -------------------- create a results folder ------------------
+rule merge_pdf:
+    input : lambda w:sorted(["%s/samples/%s/%s.pdf"%(w.path,sample,w.fig) for sample in relevant_amp(w)],key=lambda x:basename(dirname(x))),
+    output: "{path}/results/{fig}.pdf",
+    shell: "pdfunite {input} {output}"
+
+rule Pi_overall_table:
+    input : lambda w:["%s/samples/%s/EM_runs/%s_total_pi_est.csv"%(w.path,sample,sample) for sample in relevant_amp(w)],
+    output: "{path}/results/proportions.tsv"
+    run:
+        refs = {line.rstrip().split(",")[1] for file in input for index,line in enumerate(open(file)) if index>0}
+        sample_to_file = {basename(file).replace("_total_pi_est.csv",""):file for file in input}
+        # some bad runs don't really have a filtered output since there is nothing left after filtering, we require the output of CovidEM_VIN to be only total_pi_est instead of total_Filt_pi_est but then when possible use the Filtered output 
+        sample_to_file = {sample:file.replace("total_","total_Filt_") if os.path.exists(file.replace("total_","total_Filt_")) else file for sample,file in sample_to_file.items()}
+        sorted_refs = sorted(refs)
+        sorted_samples = sorted(sample_to_file)
+
+        # build a matrix
+        mat = np.zeros((len(input),len(refs)))
+        for index,sample in enumerate(sorted_samples):
+            with open(sample_to_file[sample]) as handle:
+                _=next(handle)
+                for line in handle:
+                    _,ref,percent,std = line.rstrip().split(",")
+                    mat[index,sorted_refs.index(ref)]=float(percent)
+
+        # write a matrix
+        matrix_write(mat,output[0],sorted_samples,sorted_refs)
+
+
+
+
+
+
+
+
+
+
+
+

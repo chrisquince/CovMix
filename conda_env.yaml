@@ -1,0 +1,23 @@
+name: CovMix
+channels:
+    - bioconda
+    - conda-forge
+dependencies:
+    - bwa
+    - mafft
+    - python=3
+    - iqtree
+    - samtools
+    - snakemake=6.2.1
+    - vsearch
+    - seqtk
+    - r-base
+    - r-ggplot2
+    - bioconductor-ggtree
+    - r-reshape2
+    - numpy
+    - biopython
+    - ete3
+    - pandas
+    - matplotlib
+    - poppler

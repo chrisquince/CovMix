@@ -1,0 +1,31 @@
+# ------ Resssources ------ 
+threads : 30 # default number of thread for each single task
+# ------ Output folder ------
+execution_directory: "/mnt/gpfs/seb/Project/CovMix/covid_clean/WW" # path to output folder,   
+# ------ Path to data folder ------ 
+# - all samples are required to be stored in independant folders, the folder name will later define sample names in profiles.
+# - only paired reads
+# - there must be a unique R1 file and R2 file
+# - "R1" and "R2" must be in the filenames
+# -  only following extensions : .fq, .fq.gz, .fastq, .fastq.gz, .fa, .fa.gz, .fasta, .fasta.gz 
+data: /mnt/gpfs/seb/Project/CovMix/covid_clean/data/Project_SPaterson_WWater_PlateValidation # path to data folder,
+# If needed only part of the folder may be run, to do so a list of regular expresions can be specified
+# ["*"] select everything
+# ["s*","d*"] select all folder starting with s and d
+data_regex: ["Sample*"]
+
+# ------ Database definition -------
+# path to reference database of variants, any sequence containing non atgc character will be removed
+database:
+    fasta: "/mnt/gpfs/seb/Database/covid/GISAID/reps_and_ref.fa"
+    tree: "/mnt/gpfs/seb/Database/covid/GISAID/reps_and_ref.tree" # path to the tree, if no tree is found at this place, it will be regenerated
+
+# ------ Additional parameter -------
+trimming_strictness: 1 # 0: keep only properly paired reads, 1: same as 0 and but only keep reads with both primer presents, 2: same as 1 but only keep reads with both primer complete/identical to ref
+Proportion_Threshold: 0.025 # current algo need some final threshold. Reference  found with proportion [0-1] < to this value will be ignored.
+amplicon_to_run: /mnt/gpfs/seb/Database/covid/aSelect.txt # file listing amplicons to run 
+genome_to_run: /mnt/gpfs/seb/Database/covid/gSelect.txt # file listing genomes to run
+min_reads_per_amp: 40 # any amplicon with less than that number of merged read will not be used
+max_reads_per_amp: 5000 # maximum number of reads used per amplicons, help slighly with speed
+
+

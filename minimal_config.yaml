@@ -1,0 +1,4 @@
+execution_directory: path/to/output/folder
+data: path/to/fastq/data
+database:
+    fasta: path/to/covid/database
