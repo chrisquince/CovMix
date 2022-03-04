@@ -21,3 +21,4 @@ dependencies:
     - pandas
     - matplotlib
     - poppler
+    - varscan
