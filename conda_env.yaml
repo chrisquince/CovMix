@@ -6,6 +6,7 @@ dependencies:
     - bwa
     - mafft
     - python=3
+    - scipy
     - iqtree
     - samtools
     - snakemake=6.2.1
@@ -13,8 +14,10 @@ dependencies:
     - seqtk
     - r-base
     - r-ggplot2
-    - bioconductor-ggtree
+    - bioconductor-ggtree=2.2.1
     - r-reshape2
+    - r-rvcheck=0.1.8
+    - r-dplyr<=1.0.0
     - numpy
     - biopython
     - ete3
@@ -22,3 +25,4 @@ dependencies:
     - matplotlib
     - poppler
     - varscan
+    - bam-readcount 

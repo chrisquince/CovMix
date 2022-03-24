@@ -44,6 +44,8 @@ Log = defaultdict(int)
 primer_to_cnt=defaultdict(int)
 read_to_bucket = defaultdict(lambda :[None,None])
 
+# file = "/mnt/gpfs/seb/Project/CovMix2/test_runs/trimming_issue/Sample_A0_highconc_rep1_init.sam"
+# test = []
 # for index,sam_line in enumerate(open(file)):
 for index,sam_line in enumerate(sys.stdin):
     # Skip header
@@ -103,6 +105,7 @@ for index,sam_line in enumerate(sys.stdin):
             continue
 
         # and check if fragment ends are contained in a primer region
+
         (range_left,amp_left) = primer_range.is_contained(fragment.ref_start, 'left')
         (range_right,amp_right) = primer_range.is_contained(fragment.ref_end, 'right')
        
@@ -124,6 +127,11 @@ for index,sam_line in enumerate(sys.stdin):
                 continue
 
         primer_to_cnt[amp]+=1
+
+        # change the way we trim, do that with just primer definition
+        range_left = next((start,end,strand,name) for (start,end,strand,name) in primer_range.ranges_fwd if "alt" not in name if amp in name)
+        range_right = next((start,end,strand,name) for (start,end,strand,name) in primer_range.ranges_rev if "alt" not in name if amp in name)
+
         # Chop ends of the fragment overlapping to primer
         fragment.slice(range_left)
         fragment.slice(range_right)
@@ -152,4 +160,3 @@ if args.log:
 if args.table:
     with open(args.table,"w") as handle:
         handle.writelines("%s\t%s\n"%(key,values) for key,values in sorted(primer_to_cnt.items(),key=lambda x:x[0]))
-

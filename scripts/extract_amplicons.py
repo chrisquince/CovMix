@@ -21,9 +21,12 @@ parser.add_argument('-m', help='minimum number of clean amplicon for a ref to be
 parser.add_argument('-s', help='output some stats on database: nb unique amplicons/max nb of shared amplicons ....')
 args = parser.parse_args()
 
-# REF = "/mnt/gpfs/seb/Database/covid/nCoV-2019.reference.fasta"
-# BED_FILE = "/mnt/gpfs/seb/Database/covid/nCoV-2019.primer.bed"
-# REP = "/mnt/gpfs/seb/Database/covid/GISAID/reps_and_ref.fa"
+
+# SCHEME = "Artic_V3"
+# ROOT = "/mnt/gpfs/seb/Project/CovMix/primer_schemes/%s/"%SCHEME
+# REF = "%s/%s_reference.fasta"%(ROOT,SCHEME)
+# BED_FILE = "%s/%s_primer.bed"%(ROOT,SCHEME)
+# REP = "/mnt/gpfs/seb/Database/covid/GISAID/representatives.fa"
 # TREE = "/mnt/gpfs/seb/Database/covid/GISAID/reps_and_ref.tree"
 # TREE_REL = "/mnt/gpfs/seb/Database/covid/GISAID/reps_and_ref_tree_rel.tsv"
 
@@ -75,7 +78,8 @@ else:
 # -------- real start of script --------
 # get refference data
 header,seq_ref = next(sfp(open(REF)))
-amp_to_coord = {line.rstrip().split("\t")[3]:list(map(int,line.rstrip().split("\t")[1:3])) for line in open(BED_FILE)}
+# ignore alt def and only keep normal ref
+amp_to_coord = {line.rstrip().split("\t")[3]:list(map(int,line.rstrip().split("\t")[1:3])) for line in open(BED_FILE) if "alt" not in line}
 
 # get primer sequences
 amp_to_primer = defaultdict(lambda:[None,None])

@@ -8,52 +8,53 @@ file = args[1]
 out = args[2]
 
 
-sample = sub("_total_*", "",basename(file))
+sample = sub("_total_.*", "",basename(file))
 
 # -------- things ------------
 AmpFreq <- read.csv(file,header=T)
 
 nA <- ncol(AmpFreq)
 
-AmpFreq[,3:nA] <- lapply(AmpFreq[,3:nA], function(x) {
-  as.numeric(as.character(x))
-})
-sapply(AmpFreq[,3:nA], class)
+# stupid R thing, when the dataframe has a unique column everything breaks 
+# lapply can't be used on dataframe with a unique column
+# colsums can't be used on dataframe with a unique column
+if (nA>3){
+AmpFreq[,3:nA] <- lapply(AmpFreq[,3:nA], function(x) {as.numeric(as.character(x))})
+}else{
+AmpFreq[,3] = as.numeric(as.character(AmpFreq[,3]))
+}
 
 AmpFreq <- AmpFreq[ , colSums(is.na(AmpFreq)) == 0]
-
+ 
 AmpFreq$Idx <- NULL
-
 rownames(AmpFreq) <- AmpFreq$Ref
-
 AmpFreq$Ref <- NULL
-
 AmpFreq <- AmpFreq[rowSums(AmpFreq)>0,]
 
+if (nA>3){
 AmpFreq <- AmpFreq[,colSums(AmpFreq)>100]
+}else{
+  if (sum(AmpFreq)<=100){
+    pdf(out)
+    plot.new()
+    dev.off()
+    quit()
+    }
+}
+
 
 AmpFreq <- t(AmpFreq)
-
 AmpFreqP <- AmpFreq/rowSums(AmpFreq)
-
 AmpFreqP <- t(AmpFreqP)
 
 
-AmpFreqP_R <- transform(AmpFreqP,SD=apply(AmpFreqP,1, sd, na.rm = TRUE))
-
-AmpFreqP_R <- transform(AmpFreqP_R,Mean=apply(AmpFreqP,1, mean, na.rm = TRUE))
-
-AmpFreqP_R$R <- AmpFreqP_R$SD/AmpFreqP_R$Mean
 
 
 AmpFreqP_melt <- melt(AmpFreqP)
-
 colnames(AmpFreqP_melt) <- c('Genome','Amplicon','PAbund')
-
 AmpFreqP_melt$Genome <- factor(AmpFreqP_melt$Genome,
                             levels = rownames(AmpFreqP[order(rowMeans(AmpFreqP)),]),
                             ordered = TRUE)
-
 
 
 ggheatmap <- ggplot(AmpFreqP_melt, aes(Amplicon, Genome, fill = PAbund))

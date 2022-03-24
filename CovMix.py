@@ -15,10 +15,11 @@ import os
 
 parser = argparse.ArgumentParser(description="CovMix - pipeline estimating variant proportions from amplicons")
 parser.add_argument('primer',
-                    choices=['Artic_V3', 'Nimagen_V2', 'Nimagen_V3'],
-                    help='specify primer scheme, from 3 currently supported : Artic_V3, Nimagen_V2, Nimagen_V3')
+                    choices=["Artic_V4",'Artic_V3', 'Nimagen_V2', 'Nimagen_V3',"Artic_V4-6"],
+                    help='specify primer scheme, from 5 currently supported : Artic_V4, Artic_V3, Nimagen_V2, Nimagen_V3,Artic_V4-6')
 parser.add_argument("config", type=str, help="config_file.yaml to use")
 parser.add_argument("--cores", "-c", type=int, default=1, help="Number of threads")
+parser.add_argument('--datatype', choices=["p-reads","ont"],default="p-reads",help="Illumina short paired reads or nanopore long reads")
 parser.add_argument("--verbose", "-v", action="store_true", help="Increase verbosity level")
 parser.add_argument("--dryrun", "-n", action="store_true", help="Show tasks, do not execute them")
 parser.add_argument("--unlock", "-u", action="store_true", help="Unlock the directory")
@@ -30,7 +31,10 @@ args = parser.parse_args()
 # get config file
 CONFIG_FILE = abspath(realpath(args.config))
 config = yaml.full_load(open(CONFIG_FILE))
-
+if "trim_nb" not in config:
+    trim_nb="10"
+else:
+    trim_nb = str(config["trim_nb"])
 # get repos directory
 REPOS_DIR = dirname(abspath(realpath(sys.argv[0])))
 
@@ -68,7 +72,10 @@ with cd(REPOS_DIR):
         else :
             subprocess.check_call(base_params + extra_params, stdout=sys.stdout, stderr=sys.stderr)
     call_snake.nb=0
-    call_snake(["--snakefile", "covid_primer_removal.snake"])
+    if args.datatype=="ont":
+        call_snake(["--snakefile", "scripts/nanopore_pipe.snake","--res","trim_nb=%s"%trim_nb])
+    else:
+        call_snake(["--snakefile", "covid_primer_removal.snake","--res","trim_nb=%s"%trim_nb])
 
 
 

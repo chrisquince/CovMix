@@ -1,5 +1,6 @@
 # ------ Resssources ------ 
 threads : 30 # default number of thread for each single task
+trim_nb: 10 # optional argument for number of concurent trimming, impact ram consumption, increase only if ram is high and number of sample is low. 
 # ------ Output folder ------
 execution_directory: "/mnt/gpfs/seb/Project/CovMix/covid_clean/WW" # path to output folder,   
 # ------ Path to data folder ------ 

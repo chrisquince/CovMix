@@ -1,6 +1,7 @@
 import numpy as np
 from numpy.random import default_rng
 import itertools
+import logging
 
 from collections import defaultdict
 from collections import Counter
@@ -76,7 +77,7 @@ class MixtureEM_VI():
         self.alphaPi = np.zeros(R)
         
         self.expPi = np.zeros(R)
-        
+
         self.logExpPi.fill(np.log(self.piPrior/R))
     
         self.expZ = np.zeros((N,R))
@@ -101,7 +102,9 @@ class MixtureEM_VI():
             
             fChange = abs(elbo - lastElbo)
             
-            print(str(nIter) + ',' + str(elbo) + ',' + str(fChange))
+            fString = str(nIter) + ',' + str(elbo) + ',' + str(fChange)
+            
+            logging.info(fString)
     
             lastElbo = elbo
             nIter += 1
@@ -266,6 +269,8 @@ def main(argv):
     parser.add_argument("mapping_file", help="mapping of amplicons to genomes")
     
     parser.add_argument("output_stub", help="file stub for output")
+
+    parser.add_argument("-v","--verbose",action='store_true',help='Write logging info to stdout and log file')
     
     parser.add_argument("-r","--ref_file", default=None,help='File with list of reference sequences to use')
     
@@ -273,22 +278,29 @@ def main(argv):
     
     parser.add_argument("-m","--max_iter", default=500,type=int,help = 'No. of iterations')
     
+    parser.add_argument("-i","--min_read_length", default=0,type=int,help = 'Minimum merged read length for alignment to be used')
+    
     args = parser.parse_args()
     
-    baseMap = defaultdict(lambda: 4)
-    baseMap['A'] = 0
-    baseMap['C'] = 1
-    baseMap['G'] = 2
-    baseMap['T'] = 3
-    baseMap['-'] = 4
-
+    #Set up logger
     #import ipdb; ipdb.set_trace()
+    logging.basicConfig(filename=args.output_stub+'.log',  filemode='w',
+                            format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s',
+                            datefmt='%H:%M:%S',
+                            level=logging.DEBUG)
+    
+    
+    if args.verbose:
+        logging.getLogger().addHandler(logging.StreamHandler())
     
     var_genomes = defaultdict(list)
     
-
+    
     ref_filter = set()
+    bRefFilter = False
     if args.ref_file is not None:
+        logging.info('Read reference filter file')
+        bRefFilter = True
         with open(args.ref_file,'r') as f:
         
             for line in f:
@@ -296,10 +308,14 @@ def main(argv):
                 line = line.rstrip()
     
                 ref_filter.add(line)
+    else:
+        logging.info('Not using reference filter file')
         
-    
+    bAmpliconFilter = False
     amplicon_filter = set()
     if args.amplicon_file is not None:
+        logging.info('Read amplicon filter file')
+        bAmpliconFilter = True
         with open(args.amplicon_file,'r') as f:
         
             for line in f:
@@ -307,10 +323,12 @@ def main(argv):
                 line = line.rstrip()
     
                 amplicon_filter.add(line)
-    
+    else:
+        logging.info('Not using amplicon filter file')
     
     var_filter = set()
     
+    logging.info('Reading amplicon mapping file')
     with open(args.mapping_file,'r') as f:
         
         for line in f:
@@ -322,16 +340,17 @@ def main(argv):
             
             var_amp = toks[1].split('_')[1]
             
-            if toks[2] in ref_filter:
+            if toks[2] in ref_filter or not bRefFilter:
                 var_genomes[toks[1]].append(toks[2])
             
-                if var_amp in amplicon_filter:
+                if var_amp in amplicon_filter or not bAmpliconFilter:
             
                     var_filter.add(toks[1])
     
     
     read_lengths = {}
     
+    logging.info('Reading read length file')
     with open(args.read_lengths_m,'r') as f:
         
         for line in f:
@@ -342,9 +361,6 @@ def main(argv):
             toks=line.split('\t')
     
             read_lengths[toks[0]] = int(toks[1])
-    
-
-    minLength = 200
     
 
     queries = set()
@@ -359,6 +375,7 @@ def main(argv):
     subjAmps = set()
     
     b = 0
+    logging.info('Reading blast alignment file')
     with open(args.blast_file_m,'r') as f:
         
         for line in f:
@@ -372,28 +389,20 @@ def main(argv):
                 query = toks[0]
             
                 subj = toks[1]
-            
-                #EPI_ISL_514516|AD.2|delim|EPI_ISL_582643|B.1.1.315|delim|EPI_ISL_669100|AD.1|delim|EPI_ISL_1252800|AD.2.1
-                
-                #genomes = subj.split('|delim|')
-            
-                #gString = ",".join(genomes)
-                #print(subj + '\t'+ gString)
-            
+             
                 length = int(toks[12])
-            
-                #mismatch = int(toks[4]) + int(toks[5])
+
                 pid = 0.01*float(toks[3])
                 
                 mismatch = int(round(length*(1 - pid)))# int(toks[4]) + int(toks[5])
             
                 subjectAmp = subj.split('_')[1]
             
-                if length > minLength: 
-                
-                    if subjectAmp in amplicon_filter:
+                if length > args.min_read_length: 
+                    
+                    if subjectAmp in amplicon_filter or not bAmpliconFilter:
                         
-                        if subj in var_filter:
+                        if subj in var_filter or not bRefFilter:
                             ref = var_genomes[subj]
                         
                             refs.update(ref)
@@ -407,11 +416,10 @@ def main(argv):
                     
                             ampReadMap[query] = subjectAmp
                             subjAmps.add(subjectAmp)
-                    else:
-                        print('Filter ' + subjectAmp)
                     
             if (b % 10000 == 0):
-                print(str(b))
+                logging.info('Read ' + str(b) + ' alignments')
+            
             b = b + 1
           
     ref_list = sorted(list(refs))
@@ -423,7 +431,7 @@ def main(argv):
     read_list = sorted(list(queries))
     
     N = len(queries) # number of reads
-    
+    print("queries %s"%N)
     ampl_list = sorted(list(subjAmps))
     
     A = len(ampl_list)
@@ -467,14 +475,16 @@ def main(argv):
         hitSlices[r] = tuple(sorted(hitSlice))
     
         if (r % 10000 == 0):
-            print(str(r))
+            logging.info('Processed ' + str(r) + ' reads')
     
     
     
     mixtureEM =  MixtureEM_VI(N, R, A, mismatchMatrix, matchMatrix, ampMap)
     
+    logging.info('Running variational inference')
     mixtureEM.update(args.max_iter)
     
+    logging.info('Writing output from VI')
     mixtureEM.writeOutput(args.output_stub,ampl_list,ref_list,read_list)
    
     aOutFile = args.output_stub + "amp_map.csv"
@@ -486,6 +496,7 @@ def main(argv):
    
     #Now rerun post filtering 
    
+    logging.info('Filtering with min abundance: ' + str(MIN_ABUND))
     FilterRefs = mixtureEM.expPi > MIN_ABUND
    
     ampPi = mixtureEM.getAmpliconWeights()
@@ -501,23 +512,26 @@ def main(argv):
     matchMatrix_Filt = matchMatrix[:,FilterRefs] 
     
     F = np.sum(FilterRefs)
+    logging.info(str(F) + ' genomes after filtering')
     
     if F > 0:
-        print('Run genome filtering')
+        
     
         filt_ref_list = list(compress(ref_list, FilterRefs.tolist()))
     
         mixtureEM_Filt =  MixtureEM_VI(N, F, A, mismatchMatrix_Filt, matchMatrix_Filt, ampMap)
     
+        logging.info('Run VI post filtering')
+        
         mixtureEM_Filt.update(args.max_iter)
     
         mixtureEM_Filt.writeOutput(args.output_stub + '_Filt',ampl_list,filt_ref_list,read_list)
     
     else:
-        print('No genomes above minimum abundance not running filtering')
+        logging.info('No genomes above minimum abundance not running filtering')
     
     
-    print('Program completed')
+    logging.info('Program completed')
 
 
 if __name__ == "__main__":

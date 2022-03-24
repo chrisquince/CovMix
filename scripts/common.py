@@ -8,7 +8,7 @@ except:
 
 from collections import defaultdict
 from subprocess import Popen, PIPE
-from os.path import basename, dirname
+from os.path import basename, dirname, isfile
 import os.path
 import sys
 import os
@@ -65,6 +65,8 @@ def gather_paths(path):
                 continue
             yield os.path.join(path, filename)
 
+
+
 def detect_reads(dir):
     return sorted(list(gather_paths(dir)))
 
@@ -99,16 +101,61 @@ class cd:
 def assess_samples(SAMPLES):
     Files_nb = []
     R = []
+    Files_empty = set()
     for sample,files in SAMPLES.items():
+        check = "%s/sample_ok"%dirname(files[0])
+        if isfile(check):
+            continue
+        # check that there is exactly 2 samples
         if len(files)!=2:
             Files_nb.append(sample)
+        # check that there is R1 and R2
         R1 = sum("_R1" in file for file in files)==0
         R2 = sum("_R2" in file for file in files)==0
         if R1|R2:
             R.append(sample)
+        # check that sample is not empty
+        for file in files:
+            command = ["zcat","-f",file]
+            p1 = Popen(command, stdout=PIPE, stderr=sys.stderr)
+            p2 = Popen(["head"],stdin=p1.stdout, stdout=PIPE, stderr=sys.stderr)
+            if len(p2.communicate()[0].split(b"\n"))<10:
+                Files_empty.add(sample)
+        if (not Files_empty)&(not R)&(not Files_nb):
+            os.system("touch %s"%check)
     if Files_nb:
-        sys.exit("Samples folder : "+" - ".join(Files_nb)+"  does not have exactly 2 reads files, you may have more or less than 2, files recognised as reads files are the following : .fastq, .fastq.gz, .fq, .fq.gz, .fa, .fa.gz, .fasta, .fasta.gz. You may also want to check the regular expression you used to select samples")
+        sys.exit("Samples folder : "+" - ".join(Files_nb)+"  do not have exactly 2 reads files, you may have more or less than 2, files recognised as reads files are the following : .fastq, .fastq.gz, .fq, .fq.gz, .fa, .fa.gz, .fasta, .fasta.gz. You may also want to check the regular expression you used to select samples")
     if R:
         sys.exit("Samples folder : "+" - ".join(R)+" is missing _R1/_R2 tags in files names, please correct that")
+    if Files_empty:
+        sys.exit("Samples folder : "+" - ".join(Files_empty)+" do have R1 or R2 file with less than 10 lines, please remove these folder from analysis")
+    if len(SAMPLES)==0:
+        sys.exit("No sample folder has been detected, please ensure the path corresponding to data lead to a folder containing 1 folder per sample.")
+
+# assess samples :
+def assess_nanopore_samples(SAMPLES):
+    Files_nb = []
+    R = []
+    Files_empty = set()
+    for sample,files in SAMPLES.items():
+        check = "%s/sample_ok"%dirname(files[0])
+        if isfile(check):
+            continue
+        # check that there is exactly 1 fastq
+        if len(files)!=1:
+            Files_nb.append(sample)
+        # check that sample is not empty
+        for file in files:
+            command = ["zcat","-f",file]
+            p1 = Popen(command, stdout=PIPE, stderr=sys.stderr)
+            p2 = Popen(["head"],stdin=p1.stdout, stdout=PIPE, stderr=sys.stderr)
+            if len(p2.communicate()[0].split(b"\n"))<10:
+                Files_empty.add(sample)
+        if (not Files_empty)&(not Files_nb):
+            os.system("touch %s"%check)
+    if Files_nb:
+        sys.exit("Samples folder: "+" - ".join(Files_nb)+"  do not have exactly 1 reads file, you may have more or less than 1, files recognised as reads files are the following : .fastq, .fastq.gz, .fq, .fq.gz, .fa, .fa.gz, .fasta, .fasta.gz. You may also want to check the regular expression you used to select sample folders")
+    if Files_empty:
+        sys.exit("Samples folder: "+" - ".join(Files_empty)+" is less than 10 lines long, maybe empty, please remove these folder from analysis")
     if len(SAMPLES)==0:
         sys.exit("No sample folder has been detected, please ensure the path corresponding to data lead to a folder containing 1 folder per sample.")

@@ -36,3 +36,8 @@ with open("Nimagen_V2_primer.bed","w") as handle:
         # coordinate are fine here
         handle.write("%s\t%s\t%s\t%s_LEFT\t/\t+\n"%(ref,start1,end1,name))
         handle.write("%s\t%s\t%s\t%s_RIGHT\t/\t-\n"%(ref,start2,end2,name))
+
+
+# generate Artic_V4 schemes
+# dl files from https://github.com/artic-network/artic-ncov2019/tree/master/primer_schemes/nCoV-2019/V4
+# just change names from SARS-CoV-2.reference.fasta to Artic_V4_reference.fasta
