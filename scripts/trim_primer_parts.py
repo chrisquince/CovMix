@@ -40,7 +40,7 @@ def format_reads(read):
     flag = int(flag)
 
     # get end position on ref
-    # in output, the ref_start ignore any Soft cliped nucleotide. Meaning that it is possible for the reads to start by 100 nuc, having it's ref_start being 100 after seq start.  
+    # in sam, the ref_start ignore any Soft cliped nucleotide. Meaning that it is possible for the reads to start by 100 nuc, having it's ref_start being 100 after seq start.
     # for simplification of pipeline, we shift back the ref start to take into account real read start.
     # so that we can do the simple substraction: reads start on ref - amplicon start on ref and trim the rigth length
     # H is ignored because the corresponding read seq is not outputed
@@ -271,7 +271,6 @@ for index,(reads,_) in  enumerate(read_generator):
         amp = max([(name,overlap) for name,overlap in map(lambda x:amp_overlap(reads,x),amp_to_coord.items()) if overlap>0.20],key=lambda x:x[1])[0]
     except:
         Log["overlap with amplicon < 20%"]+=1     
-        fails.append(reads[0])
         continue
 
 
