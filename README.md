@@ -46,10 +46,14 @@ to deactivate the environment, type:
 \<primer\> correspond to the primer scheme used for sequencing, at the moment it has to be exactly one of these 4 schemes:
 - Artic_V3
 - Artic_V4
+- Artic_V4-6
 - Nimagen_V2
 - Nimagen_V3.
 
+Covmix is compatible with either illumina paired reads or nanopore long reads. By default data is assumed to be paired reads. To specify nanopore reads, use the flag `--datatype ont`
+
 The flag -s is used to pass snakemake specific options, such as reruning a specific rule, creating a specific file, doing a dry run etc. 
+
 
  ### Configuration file
  The apparent lack of parameters is deceiving as all the complexity is hidden in a configuration file: [config_with_comment.yaml](https://github.com/Sebastien-Raguideau/CovMix/blob/main/config_with_comment.yaml)
@@ -79,52 +83,16 @@ The following list documents all possible arguments. Most of these are optional;
 
 - **database**:
 	- **fasta**: Denotes the path to the reference  SARS-CoV-2 genomes database. 
+	- **msa**: Specify the path to multiple sequence alignment of the database. If not specfied this will be recomputed. Be aware that a 1500 reference database takes about 10hours with 20 cores.
 	- **tree**: Specifies the path to a phylogenetic tree built from sequence stored in **fasta**. If this field is not included in the config file, CovMix will in turn generate one from aforementioned **fasta** database.
 
 
 ------ Additional parameter -------
-- **trimming_strictness**: Values can be 0, 1, 2. The default is 1.
-	- 0 : keeps only properly paired reads
-	- 1: same as 0 but keeps only reads with both primers present
-	- 2: same as 1 but keeps only reads with both primers complete/identical to primer definition 
 - **Proportion_Threshold**: Values can be between [0,1], Reference variants found with in proportions smaller than this threshold will be ignored. The default is 0.025
 - **amplicon_to_run**: The path to a file listing a sub-selection of amplicons to use.
 - **genome_to_run**:  The path to a file listing a sub-selection of genome names to use from the reference database.
 - **min_reads_per_amp**: Any amplicon with less than the specified number of merged reads will not be considered. The default is 40.
 - **max_reads_per_amp**: Specifies the maximum number of allowable reads per amplicon. This is set to facilitate speed (don't use too many reads please). The default is 5000.
-
-##  Database exploration
-
-During the CovMix pipeline, a critical step is carried out, extraction of all amplicons possible from the database and their dereplication. It allows  to reduce the number of possible sequences by ignoring redundancies. However, in some case database entries will be missing some of their amplicon. They will be called **incomplete**. It is either because we filter out amplicon sequences with degenerate nucleotides in the sequence (N, Y, K...) or it can be from the presence of variant at the primer position making it impossible to be targeted. 
-The current algorithm does not handle well incomplete database entries, slowing down and biasing proportion estimations. The alternative is to consider only part of the list of amplicons. A consequence of removing amplicons is the possibility of making some genomes identicals on the remaining amplicons sequences. 
-
-Using the script database_exploration.py help selecting a set of amplicons to remove by first ploting number of complete and unambiguous database entries as a function of number of removed amplicons. 
-
-    <path/to/CovMix>/CovMix/scripts/database_exploration.py  plot <db> <primer_bed> <ref> <outplot> <outamp> --select <selection> -t <nb>
-    
-- **plot** : a command to select ploting the graph
-- **\<db\>** : your SARS-CoV-2 genome database in .fasta format
-- **\<primer_bed\>** : primer bed definition, can be found in the primer folder of CovMix
-- **\<ref\>** : fasta file of reference genome used to define the primer ( Wuhan-Hu-1), can be found in the primer folder of CovMix
-- **\<outplot\>**:  path to output plot name
- ![alt tag](/figs/database_completion_ambi.png)
-
-- **\<outamp\>**:  path to output .tsv file. This file is used to generate aSelect and gSelect file and list, line per line which amplicon are removed and resulting list of non ambiguous genomes. 
-- **-t \<nb\>**: number of cpu to be used. The default is 1. We advise against using the default value.
-
-Which amplicon to remove is chosen depending on resulting number of unambiguous entries and mean number of missing amplicon. The `--select` flag allows to focus on a list of entries of interest, so that they are prioritised and kept when choosing which amplicon to remove.  
-- **--select \<selection\>**:  text file with one database entry's name per line.  
-
-
-In a second step, the same script can be used to generate aSelect and gSelect which can be referenced in the config file. To do so use the command **select**
-
-    \<path/to/CovMix\>/CovMix/scripts/database_exploration.py  select <nb> <outamp> <out> 
-    
-- **nb**: number of amplicon to remove, chosen from looking at previous plot, usually lowest possible but still retaining the maximum number of  unambiguous database genomes and minimum mean number of missing amplicons
-- **\<outamp\>**: file generated previously with the **plot** command. 
-- **\<out\>**:  output folder where the files aSelect and gSelect will be written down. Additionally a cluster_def.tsv file is generated with definition for cluster of ambiguous genome reference. Representative is first column and kept in the gSelect file. All other genome names from the same line would be removed. 
-
-**Important information** : gSelect will contain all non ambiguous genomes from the initial database. For ambiguous genomes, only one representative is kept. It is randomly selected. The file cluster_def.tsv, describe these cluster and which representative is taken.  
 
 **NB** - As GISAID is the current main reference in terms of SARS-CoV-2 genomes and is, as such, likely to be used in conjunction with CovMix,  we would like to remind users that it requires strict compliance with its data usage policies (please see [https://www.gisaid.org/registration/terms-of-use/](https://www.gisaid.org/registration/terms-of-use/)). Some outputs of CovMix will be as a consequence also subject to the same usage policy. Namely, tree built by CovMix and the series of fasta files splicing database entries per amplicons (see "refs" folder). 
 
@@ -192,5 +160,3 @@ The outputs in this folder summarise the results of the expectation-maximisation
 -  **Filt_** : In case the thresholding by proportion (i.e using the threshold set in  **Proportion_Threshold**) does not remove all proportions, the 4 previous  files will be regenerated with **Filt** in the name, from the algorithm rerunning after removing SARS-CoV-2 variants with proportions smaller than threshold.    
 - **SAMPLE_totalamp_map.csv**: A .csv file representing the mapping of each read name to the amplicon it maps to. 
 - A log of the algorithm, **\<SAMPLE\>_total.log**
-
-  
