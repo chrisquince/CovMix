@@ -94,7 +94,6 @@ def paired_reads_generator(file,Log):
                     yield sorted([format_reads(r) for r in reads],key=lambda x:x[1]),Log
                     reads = []
                 else:
-                    cnts[file]+=1
                     yield [format_reads(r) for r in reads],Log
                     reads = [sline]
             else:
