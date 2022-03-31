@@ -31,10 +31,7 @@ args = parser.parse_args()
 # get config file
 CONFIG_FILE = abspath(realpath(args.config))
 config = yaml.full_load(open(CONFIG_FILE))
-if "trim_nb" not in config:
-    trim_nb="10"
-else:
-    trim_nb = str(config["trim_nb"])
+
 # get repos directory
 REPOS_DIR = dirname(abspath(realpath(sys.argv[0])))
 
@@ -43,7 +40,7 @@ EXEC_DIR=abspath(realpath(config["execution_directory"]))
 os.system("mkdir -p %s"%EXEC_DIR)
 
 # ------- base parameters used to call snakemake -----------
-base_params = ["snakemake", "--directory", EXEC_DIR, "--cores", str(args.cores), "--config", "REPOS_DIR=%s"%REPOS_DIR,"PRIMER=%s"%args.primer,"CONFIG_PATH=%s"%CONFIG_FILE,"EXEC_DIR=%s"%EXEC_DIR,"--configfile="+CONFIG_FILE, "--latency-wait", "120","-k","--use-conda"]
+base_params = ["snakemake", "--directory", EXEC_DIR, "--cores", str(args.cores), "--config", "REPOS_DIR=%s"%REPOS_DIR,"PRIMER=%s"%args.primer,"CONFIG_PATH=%s"%CONFIG_FILE,"EXEC_DIR=%s"%EXEC_DIR,"DATATYPE=%s"%args.datatype,"--configfile="+CONFIG_FILE, "--latency-wait", "120","-k","--use-conda"]
 
 # ------- additional parameters -----------
 if args.verbose:
@@ -72,10 +69,11 @@ with cd(REPOS_DIR):
         else :
             subprocess.check_call(base_params + extra_params, stdout=sys.stdout, stderr=sys.stderr)
     call_snake.nb=0
-    if args.datatype=="ont":
-        call_snake(["--snakefile", "scripts/nanopore_pipe.snake","--res","trim_nb=%s"%trim_nb])
-    else:
-        call_snake(["--snakefile", "covid_primer_removal.snake","--res","trim_nb=%s"%trim_nb])
+    # so to remove checkpoint the pipeline is separated in 2 bits: 
+    # first trim and select amp to run
+    call_snake(["--snakefile", "scripts/main_pipe.snake" ,"%s/selected_amp.tsv"%EXEC_DIR])
+    # Then run regular EM, snv as well as varscan
+    call_snake(["--snakefile", "scripts/main_pipe.snake" ])
 
 
 

@@ -1,6 +1,6 @@
+
+
 msa = "rep_and_twist.msa"
-
-
 name_to_seq = {name:seq for name,seq in sfp(open(msa))}
 refseq = name_to_seq["MN908947.3"]
 
@@ -8,11 +8,20 @@ refseq = name_to_seq["MN908947.3"]
 index_to_pos = {}
 pos_to_indexes = defaultdict(list)
 
+# the add1 is necessary for consistency with variants build under:
+# when looking at variant we concat all base observed until the pos for which ref is != "-". 
+# we then use this pos for the concat bases.
+# here we use the variable add1 for the same purpose
 pos=0
+add1=0
 for index,nuc in enumerate(refseq):
-	pos+=(nuc!="-")
-	index_to_pos[index]=pos
-	pos_to_indexes[pos].append(index)
+	if (nuc=="-")&(add1==0):
+		add1 = 1
+	if nuc!="-":
+		pos+=1
+		add1=0
+	index_to_pos[index]=pos+add1
+	pos_to_indexes[pos+add1].append(index)
 
 
 trim = [300,29700]

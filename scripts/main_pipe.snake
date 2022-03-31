@@ -1,9 +1,10 @@
-from common import fill_default_values, detect_reads, extended_glob, assess_nanopore_samples
+from common import fill_default_values, detect_reads, extended_glob, assess_samples, assess_nanopore_samples
 from os.path import abspath, realpath, dirname, basename, exists, getsize
 from Bio.SeqIO.QualityIO import FastqGeneralIterator as fgi
 from Bio.SeqIO.FastaIO import SimpleFastaParser as sfp
 from collections import defaultdict
 import numpy as np
+import hashlib
 import glob
 import gzip
 import sys
@@ -27,12 +28,23 @@ DB_REF = "%s/primer_schemes/%s/%s_reference.fasta"%(REPOS_DIR,PRIMER,PRIMER) # r
 DB_PRIMER = "%s/primer_schemes/%s/%s_primer.bed"%(REPOS_DIR,PRIMER,PRIMER)
 DB_REP = config["database"]["fasta"] # rep for representatives, basically the covid genomes database
 
+# ----------------- Amplicons -------------
 # !!!ISSUE!!! currently dependent on artic type amplicon naming scheme, not sure how to adapt to general naming scheme. 
 AMPLICONS = {line.rstrip().split("\t")[3].split("_RIGHT")[0].split("_LEFT")[0] for line in open(DB_PRIMER)}
+
+# if pipe has been run previously RELEVANT_AMP is the list of selected amp to run for each sample
+# otherwise just a placeholder so that the snaekamke doesn't crash by trying to make sense of an unknown variable
+amp_selected = "%s/selected_amp.tsv"%EXEC_DIR
+if exists(amp_selected):
+    RELEVANT_AMP = {line.rstrip().split("\t")[0]:line.rstrip().split("\t")[1:] for line in open(amp_selected)}
+else:
+    RELEVANT_AMP = defaultdict(lambda:list(AMPLICONS))
+
 
 # -------- Additional parameters --------
 TRIMMING_LEVEL = config["trimming_strictness"]
 THRESHOLD = config["Proportion_Threshold"]
+DB_MSA = config["database"]["msa"]
 DB_TREE = config["database"]["tree"]
 DB_TREE_REL = config["database"]["tree_rel"]
 DB_AMP = config["database"]["amplicons"]
@@ -40,8 +52,9 @@ MAX_READS = config["max_reads_per_amp"]
 MIN_READS = config["min_reads_per_amp"]
 MIN_PID = 0.95
 MIN_CNT = 10
-# not really usefull parameter anymore, used for reference filtering before
-MIN_AMP = 0
+
+# --------- READS TYPE ------------
+DATATYPE = config["DATATYPE"] # either ont or p-reads
 
 # -------- Database --------
 # we make the assumption that the database contain the sequence used for defining primer
@@ -53,7 +66,15 @@ if not refname in {header for header,seq in sfp(open(DB_REP))}:
     os.system("cat %s %s > %s"%(DB_REP,DB_REF,new_db))
     DB_REP = new_db
 
-
+if DB_MSA!="%s/refs/tree/db_mafft.msa"%EXEC_DIR:
+    if not exists("%s/refs/tree/db_mafft.msa"%EXEC_DIR):
+        # check that all element of ref can be found in the .msa
+        headers_msa = {header.split(" ")[0] for header,_ in sfp(open(DB_MSA))}
+        header_db = {header.split(" ")[0] for header,_ in sfp(open(DB_REP))}
+        assert(header_db-headers_msa==set()),"Given multi alignement of the database is missing some entries, see for instance %s"%"\t".join(list(header_db-headers_msa))
+        os.system("mkdir -p %s/refs/tree"%EXEC_DIR)
+        os.system("ln -s %s %s/refs/tree/db_mafft.msa"%(DB_MSA,EXEC_DIR))
+        DB_MSA = "%s/refs/tree/db_mafft.msa"%EXEC_DIR
 
 # -------- filtering --------
 # default is to run all amplicons
@@ -82,17 +103,28 @@ except:
     REGEX = ["*"]
 
 SAMPLES = {basename(file):detect_reads(file) for regex in REGEX for file in extended_glob("%s/%s"%(SAMPLE_DIR,regex))}
+SAMPLES = {sample:files for sample,files in SAMPLES.items() if files}
 
+if len(RELEVANT_AMP)!=0:
+    SAMPLES = {key:val for key,val in SAMPLES.items() if key in RELEVANT_AMP}
 
-# check samples are well former, not empty
-assess_nanopore_samples(SAMPLES)
-SAMPLES = {sample:files[0] for sample,files in SAMPLES.items()}
+# check there is only 1 R1 and 1 R2 per folder
+if DATATYPE=="p-reads":
+    assess_samples(SAMPLES)
+    R1 = {sample:files["_R1" in files[1]] for sample,files in SAMPLES.items()}
+    R2 = {sample:files["_R2" in files[1]] for sample,files in SAMPLES.items()}
+else: 
+    assess_nanopore_samples(SAMPLES)
+    SAMPLES = {sample:files[0] for sample,files in SAMPLES.items()}
 
 # -------- misc python utils --------
 def matrix_write(matrix,file_name,row_names,col_names) :
     with open(file_name,"w") as handle:
         handle.write("/\t%s\n"%"\t".join(col_names))
         handle.writelines('%s\t%s\n'%(row_names[index],"\t".join(["{0:4g}".format(nb) for nb in line])) for index,line in enumerate(matrix))
+
+
+
 
 # --------------------------------------------------
 # ---------------- Snakemake start! ----------------
@@ -102,23 +134,22 @@ def matrix_write(matrix,file_name,row_names,col_names) :
 rule results:
     input: expand("%s/results/{fig}.pdf"%EXEC_DIR,fig = ["Proportions","amplicons_wise_freq","tree_freq","amplicon_wise_read_cnt"]),
            "%s/results/proportions.tsv"%EXEC_DIR,
-           expand("%s/samples/{sample}/amplicons_reads/{sample}.cnt.gz"%EXEC_DIR,sample=SAMPLES),
            "%s/snv/count.csv"%EXEC_DIR,
            expand("%s/samples/{sample}/varscan/{sample}_snv.tsv"%EXEC_DIR,sample=SAMPLES)
 
 wildcard_constraints:
-#    amp =".+(?<!total)",
-    amp = "|".join(AMPLICONS)
+    amp ="|".join(AMPLICONS),
+    sample = "|".join(SAMPLES)
 
 # --------------- cut refferences amplicon-wise ------------------------
 # build the tree
 rule mafft_tree:
     threads: THREADS
-    output:"%s/refs/tree/db_mafft.msa"%(EXEC_DIR)
+    output: DB_MSA
     shell: "mafft --auto --thread {threads} {DB_REP} > {output}"
 
 rule iqtree_building:
-    input: "%s/refs/tree/db_mafft.msa"%(EXEC_DIR)
+    input: DB_MSA
     params : "%s/refs/tree/db_tree.nwk"%EXEC_DIR
     output: DB_TREE
     log: "%s/refs/tree/iqtree.log"%EXEC_DIR
@@ -128,19 +159,13 @@ rule iqtree_building:
           mv {input}.treefile {output}
           """
 
-rule nearest_relatives:
-    input: DB_TREE
-    output: DB_TREE_REL
-    threads: THREADS
-    shell: "{SCRIPTS}/tabulate_relatives.py -t {threads} {input} {output}"
-
 # build amplicon wise database
 rule extract_amplicons:
-    # input: DB_TREE_REL
+    input: DB_MSA
     output: expand("%s/{amp}.fa"%DB_AMP,amp=AMPLICONS),
             "%s/amp_name_mapping.tsv"%DB_AMP
     shell: """
-        {SCRIPTS}/extract_amplicons.py {DB_PRIMER} {DB_REF} {DB_REP} {DB_AMP} -s {EXEC_DIR}/refs -m {MIN_AMP} """# --next_of_kin {input}
+        {SCRIPTS}/extract_amplicons.py {DB_PRIMER} {input} {DB_AMP} -s {EXEC_DIR}/refs  """
 
 
 # just symlink all relevant files in the refs folder.
@@ -149,110 +174,117 @@ rule create_tidy_ref_folder:
     output: "%s/refs/{PRIMER}_amps_seqs/tidy_done"%EXEC_DIR
     shell:"""
         mkdir -p {EXEC_DIR}/refs
-        ln -s {DB_PRIMER} {EXEC_DIR}/refs/
-        ln -s {DB_REF} {EXEC_DIR}/refs/        
+        ln -sf {DB_PRIMER} {EXEC_DIR}/refs/
+        ln -sf {DB_REF} {EXEC_DIR}/refs/        
         if [ ! -f {EXEC_DIR}/refs/genomes_database.fa ]
             then
-                ln -s {DB_REP} {EXEC_DIR}/refs/
+                ln -sf {DB_REP} {EXEC_DIR}/refs/
         fi
         if [ ! -d {EXEC_DIR}/refs/{PRIMER}_amps_seqs ]
         then
             mkdir -p {EXEC_DIR}/refs/{PRIMER}_amps_seqs
-            ln -s {DB_AMP}/* {EXEC_DIR}/refs/{PRIMER}_amps_seqs/
+            ln -sf {DB_AMP}/* {EXEC_DIR}/refs/{PRIMER}_amps_seqs/
         fi
         if [ ! -f {EXEC_DIR}/refs/tree/db_tree.nwk ]
         then  
             if [ -f {DB_TREE} ]
             then
                 mkdir -p {EXEC_DIR}/refs/tree
-                ln -s {DB_TREE} {EXEC_DIR}/refs/tree/db_tree.nwk
-            fi
-        fi
-        if [ ! -f {EXEC_DIR}/refs/tree/db_tree_rel.tsv ]
-        then  
-            if [ -f {DB_TREE_REL} ]
-            then
-                ln -s {DB_TREE_REL} {EXEC_DIR}/refs/tree/db_tree_rel.tsv
+                ln -sf {DB_TREE} {EXEC_DIR}/refs/tree/db_tree.nwk
             fi
         fi
         touch {output}
         """
 
-# --------------- use db to "clean" reads -----------------------
-# extract couple (pos,nuc) variant from database using primer definition genome as a ref
-rule mafft_amplicons:
-    input: "{path}.fa"
-    output: "{path}.msa"
-    threads: THREADS
-    shell:"""
-    mafft --thread {threads} {input} > {output} 2>/dev/null
-    """
-
-rule generate_snv_infos:
-    input: expand("{{path}}/%s_amps_seqs/{amp}.msa"%PRIMER,amp=AMPLICONS)
-    output: "{path}/db_variants_def.tsv"
-    shell:"{SCRIPTS}/extract_variants.py {DB_AMP} {DB_AMP}/amp_name_mapping.tsv {output} "
-
-
-
 # --------------- map reads to reference ------------------------
 
-rule map_init:
-    input: reads = lambda w:SAMPLES[w.sample],
-    output: "{path}/{sample}/{sample}_init.sam"
-    threads: 10
-    shell:"minimap2  -t {threads} -ax map-ont {DB_REF} {input.reads} -a | samtools sort - -o {output}"
+rule index :
+    input: "{path}" 
+    output:"{path}.pac"
+    shell: "bwa index {input}"
 
-# !!!ISSUE!!! : this script depends on LEFT/RIGTH tags in the primer bed file...
-rule filt_sam :
-    input: sam = "{path}/{sample}/{sample}_init.sam",
-    params: "{path}/{sample}/amplicons_reads/{sample}",
-    log: "{path}/{sample}/trim.log"
-    resources: trim_nb=1
-    output: files= expand("{{path}}/{{sample}}/amplicons_reads/{{sample}}_{amp}.fastq.gz",amp=AMPLICONS),
-            amp_tabl = "{path}/{sample}/{sample}_amp_pair_cnt.tsv"
-    shell: """
-        cat {input.sam} | {SCRIPTS}/nano_trim_primer_parts.py {DB_PRIMER} {DB_REF} {params} --table {output.amp_tabl} --log {log}
-        """
+if DATATYPE=="p-reads":
 
-rule cat_trimmed_files :
-    input: fq = expand("{{path}}/{{sample}}/amplicons_reads/{{sample}}_{amp}.fastq.gz",amp=AMPLICONS)
-    params: "{path}/{sample}/amplicons_reads/",
-    output: "{path}/{sample}/{sample}_trimmed.fastq.gz"
-    shell: """
-           cat {input.fq} > {output}
-           """
+    rule map_init:
+        input: "%s.pac"%DB_REF,
+               R1 = lambda w:R1[w.sample],
+               R2 = lambda w:R2[w.sample],
+        output: "{path}/{sample}/{sample}_init.sam"
+        shell:"bwa mem {DB_REF} {input.R1} {input.R2} | samtools sort -n - -o {output}"
 
-rule map_trimmed:
-    input: reads = "{path}/{sample}/{sample}_trimmed.fastq.gz"
-    output: "{path}/{sample}/{sample}_trimmed.sam"
-    threads: 10
-    shell:"minimap2 -t {threads} -ax map-ont {DB_REF} {input.reads} -a | samtools sort - -o {output}"
+    # !!!ISSUE!!! : this script depends on LEFT/RIGTH tags in the primer bed file...
+    rule filt_sam :
+        input: sam = "{path}/{sample}/{sample}_init.sam",
+        params: "{path}/{sample}/amplicons_reads/{sample}",
+        log: "{path}/{sample}/trim.log"
+        output: files_R1 = expand("{{path}}/{{sample}}/amplicons_reads/{{sample}}_{amp}_{R}.fastq.gz",amp=AMPLICONS,R=["R1","R2"]),
+                amp_tabl = "{path}/{sample}/{sample}_amp_pair_cnt.tsv"
+        shell: """
+            {SCRIPTS}/trim_primer_parts.py {input.sam} {DB_PRIMER} {params} --table {output.amp_tabl} --log {log}
+            """
 
+    rule cat_trimmed_files :
+        input: fq = expand("{{path}}/{{sample}}/amplicons_reads/{{sample}}_{amp}_{{R}}.fastq.gz",amp=AMPLICONS)
+        params: "{path}/{sample}/amplicons_reads/",
+        output: "{path}/{sample}/{sample}_trimmed_{R}.fastq.gz"
+        shell: """
+               cat {input.fq} > {output}
+               """
+
+    rule map_trimmed:
+        input: R1 = "{path}/{sample}/{sample}_trimmed_R1.fastq.gz",
+               R2 = "{path}/{sample}/{sample}_trimmed_R2.fastq.gz",
+        output: "{path}/{sample}/{sample}_trimmed.sam"
+        shell:"bwa mem {DB_REF} {input.R1} {input.R2} | samtools sort - -o {output}"
+
+
+
+else:
+
+    rule map_init:
+        input: reads = lambda w:SAMPLES[w.sample],
+        output: "{path}/{sample}/{sample}_init.sam"
+        threads: 10
+        shell:"minimap2  -t {threads} -ax map-ont {DB_REF} {input.reads} -a | samtools sort - -o {output}"
+
+    rule filt_sam :
+        input: sam = "{path}/{sample}/{sample}_init.sam",
+        params: "{path}/{sample}/amplicons_reads/{sample}",
+        log: "{path}/{sample}/trim.log"
+        output: files= expand("{{path}}/{{sample}}/amplicons_reads/{{sample}}_{amp}.fastq.gz",amp=AMPLICONS),
+                amp_tabl = "{path}/{sample}/{sample}_amp_pair_cnt.tsv"
+        shell: """
+            {SCRIPTS}/trim_primer_parts.py {input.sam} {DB_PRIMER} {params} --table {output.amp_tabl} --log {log} --datatype ont
+            """
+
+    rule cat_trimmed_files :
+        input: fq = expand("{{path}}/{{sample}}/amplicons_reads/{{sample}}_{amp}.fastq.gz",amp=AMPLICONS)
+        params: "{path}/{sample}/amplicons_reads/",
+        output: "{path}/{sample}/{sample}_trimmed.fastq.gz"
+        shell: """
+               cat {input.fq} > {output}
+               """
+
+    rule map_trimmed:
+        input: reads = "{path}/{sample}/{sample}_trimmed.fastq.gz"
+        output: "{path}/{sample}/{sample}_trimmed.sam"
+        threads: 10
+        shell:"minimap2 -t {threads} -ax map-ont {DB_REF} {input.reads} -a | samtools sort - -o {output}"
+
+rule resort_init_sam:
+    input: "{path}_init.sam"
+    output: "{path}_init_sorted.sam"
+    shell: "samtools sort {input} > {output}"
 
 rule plot_cov :
-    input: "{path}/samples/{sample}/{sample}_init.sam",
+    input: "{path}/samples/{sample}/{sample}_init_sorted.sam",
            "{path}/samples/{sample}/{sample}_trimmed.sam"
     output: "{path}/samples/{sample}/amplicon_wise_read_cnt.pdf"
     threads: 1
     shell : "{SCRIPTS}/plot_depth.py -o {output} -i {input} -p {DB_PRIMER} -t {threads}"
 
-rule mpilleup :
-    input: "{path}/{sample}_trimmed.sam"
-    output: "{path}/varscan/{sample}.pileup"
-    shell: "samtools view -b {input} | samtools mpileup -f {DB_REF} - >{output}"
-
-rule varscan :
-    input: "{path}.pileup"
-    output: snv = "{path}_snv.tsv",
-            indel = "{path}_indel.tsv"
-    shell: """
-    varscan pileup2snp {input} > {output.snv}
-    varscan pileup2indel {input} > {output.indel}
-    """
-
 # -------------------------- merged version of the pipeline ----------------------
-checkpoint assess_amp:
+rule assess_amp_merged:
     input: cnts = expand("{{path}}/samples/{sample}/{sample}_amp_pair_cnt.tsv",sample=SAMPLES),
            merged = expand("{{path}}/samples/{sample}/amplicons_reads/{sample}_{amp}.fasta",sample=SAMPLES,amp=AMPLICONS),
            tidy = "%s/refs/%s_amps_seqs/tidy_done"%(EXEC_DIR,PRIMER)
@@ -273,9 +305,9 @@ checkpoint assess_amp:
             if getsize(file)!=0:
                 for line in open(file):
                     amp,cnt = line.rstrip().split("\t")
-                    amp_file = "%s/amplicons_reads/%s_%s.fasta"%(dirname(file),sample,amp)
+                    merged = "%s/amplicons_reads/%s_%s.fasta"%(dirname(file),sample,amp)
                     min_length = (MIN_PID*amp_to_length[amp])
-                    nb_reads = len([h for h,seq in sfp(open(amp_file)) if len(seq)>min_length])
+                    nb_reads = len([h for h,seq in sfp(open(merged)) if len(seq)>min_length])
                     if nb_reads>=MIN_READS:
                         selected[sample].append(amp)
                     index_amp = sorted_amp.index(amp)
@@ -286,7 +318,7 @@ checkpoint assess_amp:
             selected_samples = np.array(sorted_samples)[ind_selected] 
             with open(output['selec'],"w") as handle:
                 handle.writelines("%s\t%s\n"%(sample,"\t".join(amps)) for sample,amps in selected.items())
-            matrix_write(selected_matrix,output["cnt"],selected_samples,sorted_amp)
+            matrix_write(selected_matrix,output["cnt"],selected_samples,map(str,sorted_amp))
         else: # nothing to be done, so let's just touch all expected output and end things there.
             shell("touch {output.selec}")
             matrix_write(matrix,output["cnt"],sorted_samples,map(str,sorted_amp))
@@ -297,10 +329,19 @@ checkpoint assess_amp:
             
 # ---------------------- run vsearch ----------------------------
 
-rule fastq_to_fasta:
-    input: "{file}.fastq.gz"
-    output: temp("{file}.fasta")
-    shell: "seqtk seq -a {input} > {output}"
+if DATATYPE=="p-reads":
+    rule vsearch_mergepair:
+        input: R1="{path}_R1.fastq.gz",
+               R2="{path}_R2.fastq.gz"
+        output:"{path}.fasta"
+        shell:"vsearch --threads 1 --fastq_mergepairs {input.R1} --reverse {input.R2} --fastaout {output} || touch {output}"
+else:
+    rule fastq_to_fasta:
+        input: "{file}.fastq.gz"
+        output: temp("{file}.fasta")
+        shell: "seqtk seq -a {input} > {output}"
+
+
 
 
 rule subsample_reads:
@@ -308,49 +349,42 @@ rule subsample_reads:
     output: "{path}_F%s.fasta"%MAX_READS
     shell: "seqtk sample -s42 {input} {MAX_READS} > {output}"
 
-rule vsearch_all:
+rule vsearch_all_merged:
     input: R = "{path}_{amp}_F%s.fasta"%MAX_READS,
            db = "%s/{amp}.fa"%DB_AMP,
     params: tmp = "{path}_{amp}.tmp",
     output: sam = "{path}_{amp}.sam",
             m6 = "{path}_{amp}.m6"
-    threads: 10
     shell: """
     sed 's/-//g' {input.db} > {params.tmp}
-    sed -i 's/nCoV2019/nCoV-2019/g' {params.tmp}
-    vsearch --threads {threads} --usearch_global {input.R} --db {params.tmp} --samout {output.sam} --samheader --id {MIN_PID} --maxaccepts 1000000 --userout {output.m6} --userfields query+target+evalue+id+pctgaps+pairs+gaps+qlo+qhi+tlo+thi+pv+ql+tl+qs+ts+alnlen+opens+exts+raw+bits+aln+caln+qrow+trow+mism+ids+qcov+tcov
+    sed 's/nCoV2019/nCoV-2019/g' -i {params.tmp}
+    vsearch --threads 1 --usearch_global {input.R} --db {params.tmp} --samout {output.sam} --samheader --id {MIN_PID} --maxaccepts 1000000 --userout {output.m6} --userfields query+target+evalue+id+pctgaps+pairs+gaps+qlo+qhi+tlo+thi+pv+ql+tl+qs+ts+alnlen+opens+exts+raw+bits+aln+caln+qrow+trow+mism+ids+qcov+tcov
     rm {params.tmp}
     """
 
-
-#-------------------- schedule tasks ------------------
-#it seems with latest version that it is not possible to refer to checkpoints before the rule is written. 
-
-def relevant_amp(w):
-    file = checkpoints.assess_amp.get(path=w.path).output["selec"]
-    return {line.rstrip().split("\t")[0]:line.rstrip().split("\t")[1:] for line in open(file)}
-
-
 #-------------------- Simple EM with error rate learning ------------------
-rule cat_m6:
-    input: fasta = lambda w:["%s/samples/%s/amplicons_reads/%s_%s.fasta"%(w.path,w.sample,w.sample,amp) for amp in relevant_amp(w)[w.sample]],
-           m6 = lambda w:["%s/samples/%s/amplicons_reads/%s_%s.m6"%(w.path,w.sample,w.sample,amp) for amp in relevant_amp(w)[w.sample]]
-    output: fasta = "{path}/samples/{sample}/{sample}_cat.fasta",
-            m6 = temp("{path}/samples/{sample}/amplicons_reads/all_amp.m6")
+rule cat_merged_m6:
+    input: fasta = lambda w:["%s/samples/%s/amplicons_reads/%s_%s.fasta"%(w.path,w.sample,w.sample,amp) for amp in RELEVANT_AMP[w.sample]],
+           m6 = lambda w:["%s/samples/%s/amplicons_reads/%s_%s.m6"%(w.path,w.sample,w.sample,amp) for amp in RELEVANT_AMP[w.sample]],
+           sam = lambda w:["%s/samples/%s/amplicons_reads/%s_%s.sam"%(w.path,w.sample,w.sample,amp) for amp in RELEVANT_AMP[w.sample]]
+    output: fasta = "{path}/samples/{sample}/{sample}.fasta",
+            m6 = temp("{path}/samples/{sample}/amplicons_reads/all_amp.m6"),
+            sam = temp("{path}/samples/{sample}/amplicons_reads/{sample}_all_refs.sam")
     shell: """
            cat {input.fasta} > {output.fasta}
            cat {input.m6} > {output.m6}
+           cat {input.sam} > {output.sam}
            """
 
 rule get_read_len:
-    input: "{path}_cat.fasta"
+    input: "{path}.fasta"
     output: "{path}_readlen.len"
     run: 
         with open(output[0],"w") as handle:
             handle.writelines("%s\t%s\n"%(header,len(seq)) for header,seq in sfp(open(input[0])))
 
 
-rule EMP_aggregated:
+rule EMP_aggregated_merged:
     input: m6 = "{path}/samples/{sample}/amplicons_reads/all_amp.m6",
            read_len = "{path}/samples/{sample}/{sample}_readlen.len",
            mapping = "%s/amp_name_mapping.tsv"%DB_AMP
@@ -362,19 +396,10 @@ rule EMP_aggregated:
            """
 
 
-# -------------------- Schedule tasks ------------------
-# in snakemake, I can't request something which directly depend on checkpoints : 
-# because checkpoint has to be called passing snakemake wildcards as argument
-# instead I create this bogus rule so that i can pass a wildcard with the correct "path" field
-
-rule schedule: 
-    input: lambda w:["%s/samples/%s/EM_runs/%s_total%s.csv"%(w.path,sample,sample,ext) for ext in ["_pi_est", "_z_est","_amp_pi_est"] for sample in relevant_amp(w)]
-    output: "{path}/done"
-    shell: "touch {output}"
-
-ruleorder: plot_proportions>plot_cov >plot_freq_tree>plot_Amplicons> merge_pdf
 
 # -------------------- create a results figs ------------------
+ruleorder: plot_proportions>plot_cov >plot_freq_tree>plot_Amplicons> merge_pdf
+
 rule plot_proportions:
     input : "{path}/samples/{sample}/EM_runs/{sample}_total_pi_est.csv"
     output: "{path}/samples/{sample}/Proportions.pdf"
@@ -393,12 +418,12 @@ rule plot_freq_tree:
 
 # -------------------- create a results folder ------------------
 rule merge_pdf:
-    input : lambda w:sorted(["%s/samples/%s/%s.pdf"%(w.path,sample,w.fig) for sample in relevant_amp(w)],key=lambda x:basename(dirname(x))),
+    input : lambda w:sorted(["%s/samples/%s/%s.pdf"%(w.path,sample,w.fig) for sample in RELEVANT_AMP],key=lambda x:basename(dirname(x))),
     output: "{path}/results/{fig}.pdf",
     shell: "pdfunite {input} {output}"
 
 rule Pi_overall_table:
-    input : lambda w:["%s/samples/%s/EM_runs/%s_total_pi_est.csv"%(w.path,sample,sample) for sample in relevant_amp(w)],
+    input : lambda w:["%s/samples/%s/EM_runs/%s_total_pi_est.csv"%(w.path,sample,sample) for sample in RELEVANT_AMP],
     output: "{path}/results/proportions.tsv"
     run:
         refs = {line.rstrip().split(",")[1] for file in input for index,line in enumerate(open(file)) if index>0}
@@ -421,115 +446,23 @@ rule Pi_overall_table:
         matrix_write(mat,output[0],sorted_samples,sorted_refs)
 
 
-# --------------- new part of the pipeline ------------
-# initially called covmix2
-# call snv/find unique read variant and alls
+# ----------------------------------------------------------------
+# -------------------- SNV part of the pipeline ------------------
+# ----------------------------------------------------------------
+def generate_header():
+    # we did a sam file concatenation, it's shit for headers,
+    # let's look at what it should be and generate some correct ones
+    # see that for md5 in python https://stackoverflow.com/questions/3431825/generating-an-md5-checksum-of-a-file
+    def md5(seq):
+        return hashlib.md5(seq.encode('utf-8')).hexdigest()
 
-# ----------- extract merged seqs --------------------
-rule format_seqs:
-    input: merged = expand("{{path}}/samples/{sample}/amplicons_reads/{sample}_{{amp}}_F%s.fasta"%MAX_READS,sample=SAMPLES),
-           amp_seqs = "%s/amp_name_mapping.tsv"%DB_AMP
-    output: tab = temp("{path}/merged_amplicons/{amp}_freq.csv"),
-            solid = temp("{path}/merged_amplicons/{amp}_solid.fa"),
-            uniq = temp("{path}/merged_amplicons/{amp}_uniq.fa")
-    run:
-        amp_to_length = {amp:np.mean([len(seq) for header,seq in sfp(open("%s/refs/%s_amps_seqs/%s.fa"%(EXEC_DIR,PRIMER,amp)))]) for amp in AMPLICONS}
-        amp = wildcards.amp
-        min_length = amp_to_length[amp]*MIN_PID
-        sorted_samples = sorted(SAMPLES)
+    refname,seq = next(sfp(open(DB_REF)))
+    header=[]
+    header.append(["@HD","VN:1.0","SO:unsorted","GO:query"])
+    header.append(["@SQ","SN:%s"%refname,"LN:%s"%len(seq),"M5:%s"%md5(seq),"UR:file:%s"%DB_REF]) 
+    header.append(["@PG","ID:vsearch","VN:2.17.1","CL:vsearch --threads 10 --usearch_global sample --db %s --samout samfile --samheader --id %s"%(refname,MIN_PID)])
+    return header
 
-        # get dereplicated sequences and counts
-        seq_counts = defaultdict(lambda :np.zeros(len(sorted_samples)).astype(int))
-        for file in input["merged"]:
-            sample = basename(dirname(dirname(file)))
-            index = sorted_samples.index(sample)
-            for header,seq in sfp(open(file)):
-                seq_counts[seq][index]+=1
-
-        # build solid sequences
-        solid_seq = [seq for seq,cnts in seq_counts.items() if len(seq)>=min_length if sum(cnts)>MIN_CNT]
-
-        # output table
-        sorted_seq = sorted(seq_counts.keys(),key=lambda x:-sum(seq_counts[x]))
-        seq_to_name = {seq:"%s_%s;size=%s"%(amp,index,int(sum(seq_counts[seq]))) for index,seq in enumerate(sorted_seq)}
-        with open(output["tab"],"w") as handle:
-            handle.write("Read,%s\n"%",".join(sorted_samples))
-            handle.writelines("%s,%s\n"%(seq_to_name[seq],",".join(list(map(str,seq_counts[seq])))) for seq in sorted_seq)
-
-        # output sequences
-        with open(output["uniq"],"w") as handle:
-            handle.writelines(">%s\n%s\n"%(seq_to_name[seq],seq) for seq in sorted_seq)
-        # solid seq
-        with open(output["solid"],"w") as handle:
-            handle.writelines(">%s\n%s\n"%(seq_to_name[seq],seq) for seq in solid_seq)
-
-
-# ----------- vsearches --------------------
-rule vsearch_solid_uniq:
-    input: solid = "{path}/{amp}_solid.fa",
-           uniq = "{path}/{amp}_uniq.fa"
-    output: temp("{path}/{amp}_U.tsv")
-    threads: 10
-    shell: "vsearch --threads {threads} --usearch_global {input.uniq} -db {input.solid} --id {MIN_PID} --maxaccepts 0 --maxrejects 0 --blast6out {output}"
-
-rule vsearch_solid_ref:
-    input: solid = "{path}/{amp}_solid.fa",
-           ref = "%s/refs/%s_amps_seqs/{amp}.fa"%(EXEC_DIR,PRIMER)
-    output: temp("{path}/{amp}_Ref.tsv")
-    threads: 10
-    shell: "vsearch --threads {threads} --usearch_global {input.solid} -db {input.ref} --id 1.00 --blast6out {output} --maxaccepts 0 --maxrejects 0 -maxhits 1"
-
-# ----------- concat results --------------------
-rule concat_seq:
-    input: expand("{{path}}/{amp}_{{type}}.fa",amp=AMPLICONS)
-    output: "{path}/Amp_{type}.fa"
-    shell: "cat {input}>{output}"
-
-rule concat_m6:
-    input: m6 = expand("{{path}}/{amp}_{{type}}.tsv",amp=AMPLICONS)
-    output: "{path}/Amp_{type}.tsv"
-    shell: "cat {input.m6} > {output}"
-
-rule concat_table:
-    input: tab = expand("{{path}}/{amp}_freq.csv",amp=AMPLICONS)
-    output: "{path}/Amp_freq.csv"
-    run:
-        with open(output[0],"w") as handle:
-            handle.write(next(open(input["tab"][0])))
-        for file in input["tab"]:
-            shell("sed '1d' %s >> {output}"%file)
-
-
-# -------------------- extract merged seqs --------------------
-
-rule get_ref_amplicons:
-    input: map = "{path}/amp_name_mapping.tsv"
-    output: expand("{{path}}/MN908947.3_{amp}.fa",amp=AMPLICONS)
-    params: path = "{path}"
-    run:
-        ref_names = {line.rstrip().split("\t")[0]:line.rstrip().split("\t")[1] for line in open(input["map"]) if "MN908947.3" in line}
-        file = lambda amp:"%s/%s.fa"%(params["path"],amp)
-        for amp,var in ref_names.items():
-            with open("%s/MN908947.3_%s.fa"%(params["path"],amp),"w") as handle:
-                header,seq = next((header,seq) for header,seq in sfp(open(file(amp))) if header==var)
-                handle.write(">%s\n%s\n"%(header,seq))
-
-
-rule vsearch_sam:
-    input: R = "{path}_{amp}.fasta",
-           db = "%s/MN908947.3_{amp}.fa"%DB_AMP
-    params: inpt = "{path}_all.fasta",
-            tmp = "{path}.tmp",
-    output: sam = temp("{path}_{amp}_ref.sam")
-    threads: 10
-    shell: """
-    vsearch --threads {threads} --usearch_global {input.R} --db {input.db} --samout {output.sam} --samheader --id {MIN_PID} 
-       """
-
-rule cat_vsearch_sam:
-    input: expand("{{path}}_{amp}_ref.sam",amp=AMPLICONS)
-    output: temp("{path}.sam")
-    shell:"cat {input} > {output}"
 
 def correct_line(line,amp_def):
     # need to add deletions to indicate where al starts
@@ -538,23 +471,28 @@ def correct_line(line,amp_def):
     amp_start,amp_end = amp_def[ref] # this is zero based
     new_start = str(int(splitline[3])+amp_start) # this is 1 based
     splitline[3] = new_start
-    splitline[2] = "MN908947.3"
+    splitline[2] = refname
+    # it is extremly likely you get a flag 256: not primary alignment from the fact we do an alignment to everyting. So, If a better ref exist, refname will never be the primary al.
+    # this is not an issue save that bam readcount ignore anything 256
+    # hence we change the sam flag to 0
+    splitline[1] = str(0)
     return "\t".join([el for el in splitline if "MD:" not in el])
 
-def generate_header():
-    # we did a sam file concatenation, it's shit for headers,
-    # let's look at what it should be and generate some correct ones
-    # see that for md5 in python https://stackoverflow.com/questions/3431825/generating-an-md5-checksum-of-a-file
-    import hashlib
-    def md5(seq):
-        return hashlib.md5(seq.encode('utf-8')).hexdigest()
 
-    refname,seq = next(sfp(open(DB_REF)))
-    header=[]
-    header.append(["@HD","VN:1.0","SO:unsorted","GO:query"])
-    header.append(["@SQ","SN:%s"%refname,"LN:%s"%len(seq),"M5:%s"%md5(seq),"UR:file:%s"%DB_REF]) 
-    header.append(["@PG","ID:vsearch","VN:2.17.1","CL:vsearch --threads 10 --usearch_global sample --db MN908947.3 --samout samfile --samheader --id 0.95"])
-    return header
+rule remove_other_refs:
+    input: map = "%s/amp_name_mapping.tsv"%DB_AMP,
+           sam = "{path}/{sample}_all_refs.sam"
+    output: sam = "{path}/{sample}.sam"
+    run:
+        ref_names = {line.rstrip().split("\t")[1] for line in open(input["map"]) if refname in line}
+        with open(output["sam"],"w") as handle:
+            for line in open(input["sam"]):
+                if line[0]=="@":
+                    continue
+                ref = line.split("\t")[2]
+                if ref in ref_names:
+                    handle.write(line)
+
 
 rule fix_sam:
     input: sam = '{path}.sam'
@@ -564,6 +502,8 @@ rule fix_sam:
         for line in open(DB_PRIMER):
             splitline = line.rstrip().split("\t")
             primer = splitline[3]
+            if "_alt" in primer:
+                continue
             amp = primer.replace("_LEFT","").replace("_RIGHT","")
             if "_LEFT" in primer:
                 amp_def[amp][0] = int(splitline[2])
@@ -571,7 +511,6 @@ rule fix_sam:
                 amp_def[amp][1] = int(splitline[1])
 
         new_headers = generate_header()
-
         with open(input["sam"]) as handle:
             with open(output["sam"],"w") as handle_w:
                 handle_w.writelines("%s\n"%"\t".join(line) for line in new_headers)
@@ -580,7 +519,6 @@ rule fix_sam:
                         continue
                     else:
                         handle_w.write(correct_line(line,amp_def))
-
 
 rule sam_to_bam:
     input: "{path}_fixed.sam" 
@@ -605,27 +543,10 @@ rule bam_readcount:
         """
 
 rule build_amp_coordinates:
-    output: coord = "{path}/amp_coord.tsv",
-            coord2 = "{path}/ref_coord.tsv"
+    output: coord = "{path}/ref_coord.tsv"
     run:
-        amp_to_coord = defaultdict(lambda:[0,0])
-        for line in open(DB_PRIMER):
-            if "alt" in line:
-                continue
-            ref,start,end,name,_,_ = line.rstrip().split("\t")
-            amp = name.split("_LEFT")[0].split("_RIGHT")[0]
-            if "_LEFT" in name:
-                amp_to_coord[amp][0] = str(int(end)+1)
-            elif "_RIGHT" in name:
-                amp_to_coord[amp][1] = str(int(start)-1)
-
-        with open(output["coord"], "w") as handle :
-            for amp,(start,end) in amp_to_coord.items():
-                handle.write("%s\n"%",".join([amp, "MN908947.3", start, end, amp, "1"]))
-        # alternative coords from issues
-        with open(output["coord2"],"w") as handle:
+        with open(output["coord"],"w") as handle:
             handle.write("%s,%s,%s,%s,%s,1"%(refname,refname,0,len(refseq),refname))
-
 
 rule extract_counts:
     input:
@@ -639,12 +560,27 @@ rule extract_counts:
         "{path}/snv/extract_counts.log"
     shell: """
     mkdir -p {wildcards.path}/snv/cnts
-    rm -r {wildcards.path}/snv/cnts
-    mkdir -p {wildcards.path}/snv/cnts
-    ln -s {input} {wildcards.path}/snv/cnts/
+    ln -sf {input} {wildcards.path}/snv/cnts/
     python {SCRIPTS}/ExtractCountFreqGenes.py {input.coords} {params.input_dir} --output_file {output} &>> {log}
         """
 
+# -------------------------------------
+# -------------- VARSCAN --------------
+# -------------------------------------
+
+rule mpilleup :
+    input: "{path}/{sample}_trimmed.sam"
+    output: "{path}/varscan/{sample}.pileup"
+    shell: "samtools view -b {input} | samtools mpileup -f {DB_REF} - >{output}"
+
+rule varscan :
+    input: "{path}.pileup"
+    output: snv = "{path}_snv.tsv",
+            indel = "{path}_indel.tsv"
+    shell: """
+    varscan pileup2snp {input} > {output.snv}
+    varscan pileup2indel {input} > {output.indel}
+    """
 
 
 

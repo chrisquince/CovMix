@@ -21,6 +21,7 @@ default_values_v2 = lambda path,primer:{
     {
     "tree":"%s/refs/tree/db_tree.nwk"%path,
     "tree_rel":"%s/refs/tree/db_tree_rel.tsv"%path,
+    "msa" :"%s/refs/tree/db_mafft.msa"%path,
     "amplicons":"%s/refs/%s_amps_seqs"%(path,primer)
     }
 } 
