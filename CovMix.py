@@ -15,8 +15,8 @@ import os
 
 parser = argparse.ArgumentParser(description="CovMix - pipeline estimating variant proportions from amplicons")
 parser.add_argument('primer',
-                    choices=["Artic_V4",'Artic_V3', 'Nimagen_V2', 'Nimagen_V3',"Artic_V4-6"],
-                    help='specify primer scheme, from 5 currently supported : Artic_V4, Artic_V3, Nimagen_V2, Nimagen_V3,Artic_V4-6')
+                    choices=['Artic_V3', "Artic_V4", "Artic_V4-6" , 'Nimagen_V2', 'Nimagen_V3', "Nimagen_V4"],
+                    help='specify primer scheme, from 5 currently supported : Artic_V4, Artic_V3, Nimagen_V2, Nimagen_V3, Nimagen_V4, Artic_V4-6')
 parser.add_argument("config", type=str, help="config_file.yaml to use")
 parser.add_argument("--cores", "-c", type=int, default=1, help="Number of threads")
 parser.add_argument('--datatype', choices=["p-reads","ont"],default="p-reads",help="Illumina short paired reads or nanopore long reads")

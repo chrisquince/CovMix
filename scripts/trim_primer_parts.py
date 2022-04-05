@@ -212,12 +212,14 @@ def reverse_complement_table(seq):
     #https://bioinformatics.stackexchange.com/questions/3583/what-is-the-fastest-way-to-get-the-reverse-complement-of-a-dna-sequence-in-pytho
     return seq.translate(tab)[::-1]
 
-def fastq_reads(read):
+def fastq_reads(read,DATATYPE):
     header,seq,qual,sign = read
     # in sam/bam output, read sequence is reorientated to + by default
-    if sign=="-":
-        qual = qual[::-1]
-        seq = reverse_complement_table(seq)
+    # for ont, if on reverse strand vsearch won't be able to work.
+    if DATATYPE!="ont":
+        if sign=="-":
+            qual = qual[::-1]
+            seq = reverse_complement_table(seq)
     return ("@%s\n%s\n+\n%s\n"%(header,seq,qual)).encode()
     
 
@@ -297,7 +299,7 @@ for index,(reads,_) in  enumerate(read_generator):
         R = trim_primer(reads[index],amp_to_coord[amp][2]) 
 
         # format reads as fastq
-        R = fastq_reads(R)
+        R = fastq_reads(R,DATATYPE)
 
         # output reads 
         handle.write(R)
