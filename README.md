@@ -64,7 +64,6 @@ The following list documents all possible arguments. Most of these are optional;
 
  ------ Resources ------
   *  **threads** : Each task is allowed a maximum of 8 cores by default, you can change this value.
-  * **trim_nb** : the trimming part of the pipeline is ram intensive and with hundred of concurrent execution may go over all available ram. This parameter allow  to specify the maximum number of concurrent execution. The default is 10. As trimming is relatively fast, increasing this value may result in mild to no speed up. 
 
 ------ Output folder ------
   * **execution_directory** : Specifies the path to your output folder.
