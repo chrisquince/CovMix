@@ -19,7 +19,7 @@ parser.add_argument('--log',default='',help="output prefix, stats on filtering")
 parser.add_argument('--datatype', choices=["p-reads","ont"],default="p-reads",help="Illumina short paired reads or nanopore long reads")
 args = parser.parse_args()
 
-OVERLAP_THRESHOLD = 20
+OVERLAP_THRESHOLD = 5 # min vsearch mergepair overlap is 5 
 FRAGMENT_MIN_SIZE = 50
 
 # pass args, maybe useless
@@ -212,16 +212,20 @@ def reverse_complement_table(seq):
     #https://bioinformatics.stackexchange.com/questions/3583/what-is-the-fastest-way-to-get-the-reverse-complement-of-a-dna-sequence-in-pytho
     return seq.translate(tab)[::-1]
 
-def fastq_reads(read,DATATYPE):
+def fastq_reads(read,reverse):
     header,seq,qual,sign = read
     # in sam/bam output, read sequence is reorientated to + by default
     # for ont, if on reverse strand vsearch won't be able to work.
-    if DATATYPE!="ont":
+    if reverse:
         if sign=="-":
             qual = qual[::-1]
             seq = reverse_complement_table(seq)
     return ("@%s\n%s\n+\n%s\n"%(header,seq,qual)).encode()
     
+def fastq_reads_novolp(read,overlap):
+    header,seq,qual,sign = read
+    # don't reverse the read keep it 
+    return ("@%s_ovlp=%s\n%s\n+\n%s\n"%(header,overlap,seq,qual)).encode()
 
 
 # ----- Real start ot the script -----------
@@ -256,6 +260,7 @@ if DATATYPE=="p-reads":
     read_generator = paired_reads_generator(SAM_FILE,Log)
     # open 2 handle per amplicon for writing, gziped
     amplicons_to_handles = {amp:[gzip.open("%s_%s_R1.fastq.gz"%(prefix,amp), 'wb', compresslevel=3),gzip.open("%s_%s_R2.fastq.gz"%(prefix,amp), 'wb', compresslevel=3)] for amp in amp_to_coord}
+    amplicons_to_handles_no_ovlp = {amp:[gzip.open("%s_%s_no_ovlp_R1.fastq.gz"%(prefix,amp), 'wb', compresslevel=3),gzip.open("%s_%s_no_ovlp_R2.fastq.gz"%(prefix,amp), 'wb', compresslevel=3)] for amp in amp_to_coord}
     amp_overlap = paired_reads_overlap
 else:
     # generator yielding primary matched reads, slighly formated
@@ -266,25 +271,32 @@ else:
 
 
 for index,(reads,_) in  enumerate(read_generator):
+    # strategy to fish back non overlaping reads
+    No_overlap = "no_such_thing"
+    handle_dict = amplicons_to_handles
 
     # get the amplicon region in which reads are contained
     try : 
-        amp = max([(name,overlap) for name,overlap in map(lambda x:amp_overlap(reads,x),amp_to_coord.items()) if overlap>0.20],key=lambda x:x[1])[0]
+        amp_ovlp = [(name,overlap) for name,overlap in map(lambda x:amp_overlap(reads,x),amp_to_coord.items()) if overlap>0.20]
+        if sum([el[1] for el in amp_ovlp])>1.5:
+            Log["overlap with more than 1 amplicon"]+=1
+        amp = max(amp_ovlp,key=lambda x:x[1])[0]
     except:
         Log["overlap with amplicon < 20%"]+=1     
         continue
 
-
     if DATATYPE=="p-reads":
-        # check that reads overlap, otherwise, it's shit
-    
+        # check that reads overlap, otherwise, we can't merge them
         # remember reads = [read1,read2]
         # read1 = [name,ref_start,ref_end,frag_len,sign]
-        overlap = (reads[0][2]-reads[1][1])>=OVERLAP_THRESHOLD
-        if not overlap:
-            Log["not overlapping with eachover"]+=1
+        overlap = (reads[0][2]-reads[1][1])
+        if 0<=overlap<OVERLAP_THRESHOLD:
+            Log["overlap within [0,5]"]+=1
+            No_overlap = overlap
+            handle_dict = amplicons_to_handles_no_ovlp
+        if overlap<0:
+            Log["reads not overlaping"]+=1
             continue
-
         # remove reads if fragment length is less than min size
         frag_len = reads[1][2]-reads[0][1]
         if frag_len<FRAGMENT_MIN_SIZE:
@@ -294,15 +306,19 @@ for index,(reads,_) in  enumerate(read_generator):
     primer_to_cnt[amp]+=1
 
     # loop so that ont and p-reads can be dealed with in the same fashion
-    for index,handle in enumerate(amplicons_to_handles[amp]):
+    for index,handle in enumerate(handle_dict[amp]):
         # Chop ends of the fragment overlapping to primer
         R = trim_primer(reads[index],amp_to_coord[amp][2]) 
 
         # format reads as fastq
-        R = fastq_reads(R,DATATYPE)
+        if No_overlap!="no_such_thing":
+            R = fastq_reads_novolp(R,overlap)
+        else:
+            R = fastq_reads(R,DATATYPE=="p-reads")  # when formating reverse R2 
 
         # output reads 
         handle.write(R)
+
 
 # close thoses handles, otherwise python need to do it himself at the end of the run
 # and that cause delay in file appearing on disk, and snakemake fail.
@@ -310,13 +326,20 @@ for handles in amplicons_to_handles.values():
     for handle in handles:
         handle.close()
 
+if DATATYPE=="p-reads":
+    for handles in amplicons_to_handles_no_ovlp.values():
+        for handle in handles:
+            handle.close()
+
 Log["nb valid reads"] = sum(primer_to_cnt.values())
 if args.log:
     with open(args.log,"w") as handle:
-        sorted_keys = ['Total nb of reads',"nb valid reads",'Not primary or supplementary','properly paired',"overlap with amplicon < 20%","not overlapping with eachover","fragment size < %s "%FRAGMENT_MIN_SIZE,"Unmapped",]
+        sorted_keys = ['Total nb of reads',"nb valid reads",'Not primary or supplementary','properly paired',"overlap with more than 1 amplicon","overlap with amplicon < 20%","overlap within [0,5]","reads not overlaping","fragment size < %s "%FRAGMENT_MIN_SIZE,"Unmapped"]
         handle.writelines("%s\t%s\n"%(key,Log[key]) for key in sorted_keys)
 
 if args.table:
     with open(args.table,"w") as handle:
         handle.writelines("%s\t%s\n"%(key,values) for key,values in sorted(primer_to_cnt.items(),key=lambda x:x[0]))
+
+
 

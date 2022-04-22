@@ -77,22 +77,18 @@ if DB_MSA!="%s/refs/tree/db_mafft.msa"%EXEC_DIR:
         DB_MSA = "%s/refs/tree/db_mafft.msa"%EXEC_DIR
 
 # -------- filtering --------
+# TODO check validity of passed files
 # default is to run all amplicons
 if config["amplicon_to_run"]:
     DB_RUN_A = config["amplicon_to_run"]
 else:
-    os.system("mkdir -p %s/refs"%EXEC_DIR)
-    DB_RUN_A = "%s/refs/aSelect.tsv"%EXEC_DIR
-    with open(DB_RUN_A,"w") as handle:
-        handle.writelines("%s\n"%el.split("_")[-1] for el in AMPLICONS)
+    DB_RUN_A = ""
 
 # default is to run all genomes
 if config["genome_to_run"]:
     DB_RUN_G = config["genome_to_run"]
 else:
-    DB_RUN_G = "%s/refs/gSelect.tsv"%EXEC_DIR
-    with open(DB_RUN_G,"w") as handle:
-        handle.writelines("%s\n"%header.split(" ")[0] for header,_ in sfp(open(DB_REP)))
+    DB_RUN_G = ""
 
 
 # -------- Samples --------
@@ -134,7 +130,7 @@ def matrix_write(matrix,file_name,row_names,col_names) :
 rule results:
     input: expand("%s/results/{fig}.pdf"%EXEC_DIR,fig = ["Proportions","amplicons_wise_freq","tree_freq","amplicon_wise_read_cnt"]),
            "%s/results/proportions.tsv"%EXEC_DIR,
-           "%s/snv/count.csv"%EXEC_DIR,
+           "%s/snv/snv_table.tsv"%EXEC_DIR,
            expand("%s/samples/{sample}/varscan/{sample}_snv.tsv"%EXEC_DIR,sample=SAMPLES)
 
 wildcard_constraints:
@@ -333,14 +329,45 @@ if DATATYPE=="p-reads":
     rule vsearch_mergepair:
         input: R1="{path}_R1.fastq.gz",
                R2="{path}_R2.fastq.gz"
+        output:temp("{path}_merged.fasta")
+        shell:"vsearch --threads 1 --fastq_mergepairs {input.R1} --reverse {input.R2} --fastq_minovlen 5 --fastaout {output} || touch {output}" # overlap is filtered for and all paired reads overlap at least by 1
+    rule deal_with_low_overlap:
+        input: merged = "{path}_merged.fasta"
         output:"{path}.fasta"
-        shell:"vsearch --threads 1 --fastq_mergepairs {input.R1} --reverse {input.R2} --fastaout {output} || touch {output}"
+        run:
+            # we do a manual merging of paired reads overlapping with 0-5 bases. I'll just keep the better qual one if bases are different
+            # concat that to the vsearch merged ones.
+            R1_handle = fgi(gzip.open("%s_no_ovlp_R1.fastq.gz"%wildcards['path'], "rt"))
+            R2_handle = fgi(gzip.open("%s_no_ovlp_R2.fastq.gz"%wildcards['path'], "rt"))
+            with open(output[0],"w") as handle:
+                for h_R1,seq_R1,qual_R1 in R1_handle:
+                    h_R2,seq_R2,qual_R2 = next(R2_handle)
+                    assert(h_R1==h_R2),"issue with non overlaping reads order"
+                    header,overlap = h_R1.split("_ovlp=")
+                    overlap = int(overlap)
+                    if (len(seq_R1)>overlap)&(len(seq_R2)>overlap):
+                        if overlap==0:
+                            handle.write(">%s\n%s\n"%(header,seq_R1+seq_R2))
+                        else:
+                            seq = seq_R1[:-overlap]
+                            for i in range(0,overlap):
+                                nuc1 = seq_R1[-overlap+i]
+                                qual1 = ord(qual_R1[-overlap+i])-33
+                                nuc2 = seq_R2[i]
+                                qual2 = ord(qual_R2[i])-33
+                                nuc = max([(nuc1,qual1),(nuc2,qual2)],key=lambda x:x[1])
+                                seq += nuc[0]
+                            seq += seq_R2[overlap:]
+                            handle.write(">%s\n%s\n"%(header,seq))
+                    else:
+                        seq = max([seq_R1,seq_R2],key=len)
+                        handle.write(">%s\n%s\n"%(header,seq))
+                handle.write(open(input["merged"]).read())
 else:
     rule fastq_to_fasta:
         input: "{file}.fastq.gz"
         output: temp("{file}.fasta")
         shell: "seqtk seq -a {input} > {output}"
-
 
 
 
@@ -389,9 +416,10 @@ rule EMP_aggregated_merged:
            read_len = "{path}/samples/{sample}/{sample}_readlen.len",
            mapping = "%s/amp_name_mapping.tsv"%DB_AMP
     output: expand("{{path}}/samples/{{sample}}/EM_runs/{{sample}}_total{ext}.csv",ext=["_pi_est", "_z_est","_amp_pi_est"])
-    params: out = "{path}/samples/{sample}/EM_runs/{sample}_total"
+    params: out = "{path}/samples/{sample}/EM_runs/{sample}_total",
+            filt = (DB_RUN_A!="")*("-a "+DB_RUN_A+" ")+(DB_RUN_G!="")*("-r "+DB_RUN_G+" ")
     shell: """
-           python  {SCRIPTS}/CovidEM_VIN.py {input.m6} {input.read_len} {input.mapping} {params.out} -r {DB_RUN_G} -a {DB_RUN_A}
+           python  {SCRIPTS}/CovidEM_VIN.py {input.m6} {input.read_len} {input.mapping} {params.out} {params.filt}
            touch {output}
            """
 
@@ -563,6 +591,13 @@ rule extract_counts:
     ln -sf {input} {wildcards.path}/snv/cnts/
     python {SCRIPTS}/ExtractCountFreqGenes.py {input.coords} {params.input_dir} --output_file {output} &>> {log}
         """
+
+rule plot_and_snv_table:
+    input: "{path}/snv/count.csv",
+           "{path}/refs/db_snv.tsv"
+    output: "{path}/snv/snv_table.tsv"
+    shell: "{SCRIPTS}/snv_summary.py {EXEC_DIR}"
+
 
 # -------------------------------------
 # -------------- VARSCAN --------------
