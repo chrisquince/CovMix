@@ -120,6 +120,22 @@ def matrix_write(matrix,file_name,row_names,col_names) :
         handle.writelines('%s\t%s\n'%(row_names[index],"\t".join(["{0:4g}".format(nb) for nb in line])) for index,line in enumerate(matrix))
 
 
+def load_matrix(file,sep="\t",sample_order=None,strain_order=None) :
+    with open(file) as handle :
+        header = next(handle).rstrip().split(sep)[1:]
+        strains = []
+        matrix = []
+        for line in handle : 
+            splitlines = line.rstrip().split(sep)
+            strains.append(splitlines[0])
+            matrix.append(list(map(float,splitlines[1:])))
+    matrix = np.array(matrix)
+    if sample_order :
+        reorder_samples = [header.index(sample) for sample in sample_order]
+        reorder_strain = [strains.index(strain) for strain in strain_order]
+        return matrix[:,reorder_samples][reorder_strain,:]
+    else : 
+        return matrix,header,strains
 
 
 # --------------------------------------------------
@@ -214,7 +230,7 @@ if DATATYPE=="p-reads":
         params: "{path}/{sample}/amplicons_reads/{sample}",
         log: "{path}/{sample}/trim.log"
         output: files_R1 = expand("{{path}}/{{sample}}/amplicons_reads/{{sample}}_{amp}_{R}.fastq.gz",amp=AMPLICONS,R=["R1","R2"]),
-                amp_tabl = "{path}/{sample}/{sample}_amp_pair_cnt.tsv"
+                amp_tabl = temp("{path}/{sample}/{sample}_amp_cnt_init.tsv")
         shell: """
             {SCRIPTS}/trim_primer_parts.py {input.sam} {DB_PRIMER} {params} --table {output.amp_tabl} --log {log}
             """
@@ -248,7 +264,7 @@ else:
         params: "{path}/{sample}/amplicons_reads/{sample}",
         log: "{path}/{sample}/trim.log"
         output: files= expand("{{path}}/{{sample}}/amplicons_reads/{{sample}}_{amp}.fastq.gz",amp=AMPLICONS),
-                amp_tabl = "{path}/{sample}/{sample}_amp_pair_cnt.tsv"
+                amp_tabl = temp("{path}/{sample}/{sample}_amp_cnt_init.tsv")
         shell: """
             {SCRIPTS}/trim_primer_parts.py {input.sam} {DB_PRIMER} {params} --table {output.amp_tabl} --log {log} --datatype ont
             """
@@ -280,47 +296,55 @@ rule plot_cov :
     shell : "{SCRIPTS}/plot_depth.py -o {output} -i {input} -p {DB_PRIMER} -t {threads}"
 
 # -------------------------- merged version of the pipeline ----------------------
-rule assess_amp_merged:
-    input: cnts = expand("{{path}}/samples/{sample}/{sample}_amp_pair_cnt.tsv",sample=SAMPLES),
-           merged = expand("{{path}}/samples/{sample}/amplicons_reads/{sample}_{amp}.fasta",sample=SAMPLES,amp=AMPLICONS),
-           tidy = "%s/refs/%s_amps_seqs/tidy_done"%(EXEC_DIR,PRIMER)
-    params: end_pipeline1 = expand("%s/results/{fig}.pdf"%EXEC_DIR,fig = ["Proportions","amplicons_wise_freq","tree_freq","amplicon_wise_read_cnt"]),
-            end_pipeline2 = "%s/results/proportions.tsv"%EXEC_DIR 
+rule tabulate_amp_merged:
+    input: cnts = "{path}/{sample}_amp_cnt_init.tsv",
+           global_al = expand("{{path}}/amplicons_reads/{{sample}}_{amp}.m6",amp=AMPLICONS)
+    output: cnt = "{path}/{sample}_amp_cnt.tsv"
+    run:
+        nb_amp = len(AMPLICONS)
+        sorted_amp = sorted(AMPLICONS)
+        sample = wildcards["sample"]
+        matrix = np.zeros((1,nb_amp))
+        amp_to_length = {amp:np.mean([len(seq) for header,seq in sfp(open("%s/refs/%s_amps_seqs/%s.fa"%(EXEC_DIR,PRIMER,amp)))]) for amp in sorted_amp}
+        dummy = "need_at_least_one_entry_so_vsearch_doesnt_throw_an_error"
+        for file in input["global_al"]:
+            os.system("sed -i '/^%s/d' %s"%(dummy,file))
+            os.system("sed -i '/^%s/d' %s"%(dummy,file.replace(".m6",".sam")))
+            if getsize(file)!=0:
+                amp = basename(file).split("%s_"%sample)[1].replace(".m6","")
+                nb_reads = len({line.rstrip().split("\t")[0] for line in open(file)})
+                index_amp = sorted_amp.index(amp)
+                matrix[0,index_amp]=int(nb_reads)
+        # output cnts
+        matrix_write(matrix,output["cnt"],[sample],map(str,sorted_amp))
+
+
+rule select_sample_and_amp:
+    input: cnts = expand("{{path}}/samples/{sample}/{sample}_amp_cnt.tsv",sample=SAMPLES),
+           tidy = "%s/refs/%s_amps_seqs/tidy_done"%(EXEC_DIR,PRIMER),
     output: selec = "{path}/selected_amp.tsv",
             cnt = "{path}/results/amp_cnts.tsv"
     run:
         nb_amp = len(AMPLICONS)
         sorted_amp = sorted(AMPLICONS)
         sorted_samples = sorted([basename(dirname(file)) for file in input["cnts"]])
+        print(sorted_samples)
         matrix = np.zeros((len(input["cnts"]),nb_amp))
-        selected = defaultdict(list)
         amp_to_length = {amp:np.mean([len(seq) for header,seq in sfp(open("%s/refs/%s_amps_seqs/%s.fa"%(EXEC_DIR,PRIMER,amp)))]) for amp in sorted_amp}
+        sample_to_amp = defaultdict(list)
         for file in input["cnts"]:
             sample = basename(dirname(file))
             index_sample = sorted_samples.index(sample)
-            if getsize(file)!=0:
-                for line in open(file):
-                    amp,cnt = line.rstrip().split("\t")
-                    merged = "%s/amplicons_reads/%s_%s.fasta"%(dirname(file),sample,amp)
-                    min_length = (MIN_PID*amp_to_length[amp])
-                    nb_reads = len([h for h,seq in sfp(open(merged)) if len(seq)>min_length])
-                    if nb_reads>=MIN_READS:
-                        selected[sample].append(amp)
-                    index_amp = sorted_amp.index(amp)
-                    matrix[index_sample,index_amp]=int(nb_reads)
-        ind_selected = np.array([sorted_samples.index(sample) for sample in selected])
-        if len(ind_selected)!=0:
-            selected_matrix = matrix[ind_selected,:]
-            selected_samples = np.array(sorted_samples)[ind_selected] 
-            with open(output['selec'],"w") as handle:
-                handle.writelines("%s\t%s\n"%(sample,"\t".join(amps)) for sample,amps in selected.items())
-            matrix_write(selected_matrix,output["cnt"],selected_samples,map(str,sorted_amp))
-        else: # nothing to be done, so let's just touch all expected output and end things there.
-            shell("touch {output.selec}")
-            matrix_write(matrix,output["cnt"],sorted_samples,map(str,sorted_amp))
-            for val in params.end_pipeline1:
-                shell("touch %s"%val)
-            shell('touch {params.end_pipeline2}')
+            cnts,sorted_amp,_ = load_matrix(file,sep="\t")
+            for index,amp in enumerate(sorted_amp):
+                if cnts[0,index]>=MIN_READS:
+                    sample_to_amp[sample].append(amp)
+            matrix[index_sample,:] = cnts
+
+        #output results
+        with open(output['selec'],"w") as handle:
+            handle.writelines("%s\t%s\n"%(sample,"\t".join(amps)) for sample,amps in sample_to_amp.items())
+        matrix_write(matrix,output["cnt"],sorted_samples,sorted_amp)
 
             
 # ---------------------- run vsearch ----------------------------
@@ -385,13 +409,16 @@ rule vsearch_all_merged:
     shell: """
     sed 's/-//g' {input.db} > {params.tmp}
     sed 's/nCoV2019/nCoV-2019/g' -i {params.tmp}
+    echo '>need_at_least_one_entry_so_vsearch_doesnt_throw_an_error'>>{input.R}
+    echo 'ATGC'>>{input.R}
     vsearch --threads 1 --usearch_global {input.R} --db {params.tmp} --samout {output.sam} --samheader --id {MIN_PID} --maxaccepts 1000000 --userout {output.m6} --userfields query+target+evalue+id+pctgaps+pairs+gaps+qlo+qhi+tlo+thi+pv+ql+tl+qs+ts+alnlen+opens+exts+raw+bits+aln+caln+qrow+trow+mism+ids+qcov+tcov
     rm {params.tmp}
     """
 
 #-------------------- Simple EM with error rate learning ------------------
 rule cat_merged_m6:
-    input: fasta = lambda w:["%s/samples/%s/amplicons_reads/%s_%s.fasta"%(w.path,w.sample,w.sample,amp) for amp in RELEVANT_AMP[w.sample]],
+    input: prior_step = "{path}/selected_amp.tsv",
+           fasta = lambda w:["%s/samples/%s/amplicons_reads/%s_%s.fasta"%(w.path,w.sample,w.sample,amp) for amp in RELEVANT_AMP[w.sample]],
            m6 = lambda w:["%s/samples/%s/amplicons_reads/%s_%s.m6"%(w.path,w.sample,w.sample,amp) for amp in RELEVANT_AMP[w.sample]],
            sam = lambda w:["%s/samples/%s/amplicons_reads/%s_%s.sam"%(w.path,w.sample,w.sample,amp) for amp in RELEVANT_AMP[w.sample]]
     output: fasta = "{path}/samples/{sample}/{sample}.fasta",
@@ -581,7 +608,7 @@ rule extract_counts:
         expand("{{path}}/samples/{sample}/amplicons_reads/{sample}.cnt.gz", sample=SAMPLES),
         coords = "{path}/snv/ref_coord.tsv"
     output:
-        "{path}/snv/count.csv"
+        "{path}/snv/count_raw.csv"
     params:
         input_dir = "{path}/snv/cnts"
     log:
@@ -591,10 +618,21 @@ rule extract_counts:
     ln -sf {input} {wildcards.path}/snv/cnts/
     python {SCRIPTS}/ExtractCountFreqGenes.py {input.coords} {params.input_dir} --output_file {output} &>> {log}
         """
+rule filter_variants:
+    input: "{path}/count_raw.csv"
+    output: cnts = "{path}/count.csv",
+            fold = "{path}/filter/counts_tran_df.csv"
+    params: stub = "{path}/filter/counts_"
+    shell:  """
+    {SCRIPTS}/Variant_Filter.py {input} -o {params.stub} 
+    mv {params.stub}sel_var.csv {output.cnts}
+    """
+
 
 rule plot_and_snv_table:
     input: "{path}/snv/count.csv",
-           "{path}/refs/db_snv.tsv"
+           "{path}/refs/db_snv.tsv",
+           "{path}/results/proportions.tsv",
     output: "{path}/snv/snv_table.tsv"
     shell: "{SCRIPTS}/snv_summary.py {EXEC_DIR}"
 

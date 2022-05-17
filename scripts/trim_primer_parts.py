@@ -217,9 +217,8 @@ def fastq_reads(read,reverse):
     # in sam/bam output, read sequence is reorientated to + by default
     # for ont, if on reverse strand vsearch won't be able to work.
     if reverse:
-        if sign=="-":
-            qual = qual[::-1]
-            seq = reverse_complement_table(seq)
+        qual = qual[::-1]
+        seq = reverse_complement_table(seq)
     return ("@%s\n%s\n+\n%s\n"%(header,seq,qual)).encode()
     
 def fastq_reads_novolp(read,overlap):
@@ -314,7 +313,7 @@ for index,(reads,_) in  enumerate(read_generator):
         if No_overlap!="no_such_thing":
             R = fastq_reads_novolp(R,overlap)
         else:
-            R = fastq_reads(R,DATATYPE=="p-reads")  # when formating reverse R2 
+            R = fastq_reads(R,index==1)  # when formating reverse R2 
 
         # output reads 
         handle.write(R)

@@ -36,7 +36,7 @@ config = yaml.full_load(open(CONFIG_FILE))
 REPOS_DIR = dirname(abspath(realpath(sys.argv[0])))
 
 # execution directory
-EXEC_DIR=abspath(realpath(config["execution_directory"]))
+EXEC_DIR = abspath(realpath(config["execution_directory"]))
 os.system("mkdir -p %s"%EXEC_DIR)
 
 # ------- base parameters used to call snakemake -----------
@@ -55,6 +55,9 @@ if args.dag:
     base_params.extend(["--rulegraph"])
 if args.s :
     base_params.extend(args.s)
+    NOTHING_ELSE = 1
+else:
+    NOTHING_ELSE = 0
 
 
 # ------- call snakemake from  METAHOOD_DIR -----------
@@ -71,7 +74,12 @@ with cd(REPOS_DIR):
     call_snake.nb=0
     # so to remove checkpoint the pipeline is separated in 2 bits: 
     # first trim and select amp to run
-    call_snake(["--snakefile", "scripts/main_pipe.snake" ,"%s/selected_amp.tsv"%EXEC_DIR])
+    if NOTHING_ELSE:
+        objective = []
+    else:
+        objective = ["%s/selected_amp.tsv"%EXEC_DIR]
+
+    call_snake(["--snakefile", "scripts/main_pipe.snake"]+objective)
     # Then run regular EM, snv as well as varscan
     call_snake(["--snakefile", "scripts/main_pipe.snake" ])
 
