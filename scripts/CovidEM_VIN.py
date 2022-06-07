@@ -258,7 +258,8 @@ class MixtureEM_VI():
                 zString = ','.join(zList)
                 print('%d,%s,%s' % (n,read_list[n],zString),file=f)
             
-
+#MIN_AMP_FREQ = 10
+    
 def main(argv):
     parser = argparse.ArgumentParser()
 
@@ -283,7 +284,7 @@ def main(argv):
     args = parser.parse_args()
     
     #Set up logger
-    #import ipdb; ipdb.set_trace()
+   # import ipdb; ipdb.set_trace()
     logging.basicConfig(filename=args.output_stub+'.log',  filemode='w',
                             format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s',
                             datefmt='%H:%M:%S',
@@ -327,7 +328,7 @@ def main(argv):
         logging.info('Not using amplicon filter file')
     
     var_filter = set()
-    
+    genome_amp_map = defaultdict(dict)
     logging.info('Reading amplicon mapping file')
     with open(args.mapping_file,'r') as f:
         
@@ -342,7 +343,7 @@ def main(argv):
             
             if toks[2] in ref_filter or not bRefFilter:
                 var_genomes[toks[1]].append(toks[2])
-            
+                genome_amp_map[var_amp][toks[2]] = toks[1]
                 if var_amp in amplicon_filter or not bAmpliconFilter:
             
                     var_filter.add(toks[1])
@@ -373,7 +374,7 @@ def main(argv):
     
     refs = set()
     subjAmps = set()
-    
+    ampFreq = Counter()
     b = 0
     logging.info('Reading blast alignment file')
     with open(args.blast_file_m,'r') as f:
@@ -406,27 +407,74 @@ def main(argv):
                             ref = var_genomes[subj]
                         
                             refs.update(ref)
-
-                            queries.add(query)
+                            
+                            if query not in queries:
+                                    
+                                queries.add(query)
+                                
+                                ampReadMap[query] = subjectAmp
+                                
+                                ampFreq[subjectAmp] += 1   
+                                
+                                subjAmps.add(subjectAmp)
+                                    
                             readMaps[query][subj] = (mismatch,length - mismatch)
                     
                             queryAlign = toks[23]
                             subjectAlign = toks[24]
                     
-                    
-                            ampReadMap[query] = subjectAmp
-                            subjAmps.add(subjectAmp)
+                            
                     
             if (b % 10000 == 0):
                 logging.info('Read ' + str(b) + ' alignments')
             
             b = b + 1
-          
-    ref_list = sorted(list(refs))
+    
+    #ampFilter = set( [k for k, v in ampFreq.items() if v > MIN_AMP_FREQ])
+    ampFilter = subjAmps
+    genomeMap = defaultdict(str)
+    
+    for g in refs:
+        for amp in ampFilter:
+            if g in genome_amp_map[amp]:
+                genomeMap[g] += genome_amp_map[amp][g] + '$'
+            else:
+                genomeMap[g] += '*$'
+    
+    
+    uniqueKeys = set(genomeMap.values())
+    
+    uMap = defaultdict(list)
+    
+    for (g,gkey) in genomeMap.items():
+        uMap[gkey].append(g) 
+    
+    gChar = {}
+    mapBack = {}
+    for (mapg,gSet) in uMap.items():
+        
+        gSet = sorted(gSet)
+    
+        gChar[mapg] = gSet[0]
+        mapBack[gSet[0]] = uMap[mapg]
+    
+    gChar = sorted(gChar.values())
+    
+    ref_list = sorted(gChar)
     
     R = len(ref_list) # number of references
     
     ref_map = {ref:i for (i,ref) in enumerate(ref_list)}
+    
+    mapFile = args.output_stub + "ref_map.csv"
+    
+    with open(mapFile,'w') as f:
+        print('n,ID,NG,Genomes',file=f)
+       
+        for r in range(R):
+            mString = '$'.join(mapBack[ref_list[r]])
+            print('%d,%s,%d,%s' % (r,ref_list[r],len(mapBack[ref_list[r]]),mString),file=f)
+    
     
     read_list = sorted(list(queries))
     
@@ -465,12 +513,12 @@ def main(argv):
             hGenomes = var_genomes[hit]
             
             for g in hGenomes: 
+                if g in ref_list:
+                    gidx = ref_map[g]
             
-                gidx = ref_map[g]
-            
-                mismatchMatrix[r,gidx] = mismatch
-                matchMatrix[r,gidx] = mmatch
-                hitSlice.append(gidx)
+                    mismatchMatrix[r,gidx] = mismatch
+                    matchMatrix[r,gidx] = mmatch
+                    hitSlice.append(gidx)
             
         hitSlices[r] = tuple(sorted(hitSlice))
     
