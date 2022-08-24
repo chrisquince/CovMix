@@ -15,7 +15,7 @@ import os
 import re
 
 
-default_values = {"trimming_strictness":1,"Proportion_Threshold":0.025, "data_regex":["*"],"threads":20,"min_reads_per_amp":40,"max_reads_per_amp":5000,"amplicon_to_run":"","genome_to_run":""}
+default_values = {"trimming_strictness":1,"Proportion_Threshold":0.025, "data_regex":["*"],"threads":20,"min_reads_per_amp":40,"max_reads_per_amp":1000,"amplicon_to_run":"","genome_to_run":""}
 default_values_v2 = lambda path,primer:{
 "database":
     {

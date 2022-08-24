@@ -147,7 +147,7 @@ rule results:
     input: expand("%s/results/{fig}.pdf"%EXEC_DIR,fig = ["Proportions","amplicons_wise_freq","tree_freq","amplicon_wise_read_cnt"]),
            "%s/results/proportions.tsv"%EXEC_DIR,
            "%s/snv/snv_table.tsv"%EXEC_DIR,
-           expand("%s/samples/{sample}/varscan/{sample}_snv.tsv"%EXEC_DIR,sample=SAMPLES)
+           expand("%s/samples/{sample}/varscan/{sample}_snv.tsv"%EXEC_DIR,sample=SAMPLES),
 
 wildcard_constraints:
     amp ="|".join(AMPLICONS),
@@ -230,7 +230,7 @@ if DATATYPE=="p-reads":
         params: "{path}/{sample}/amplicons_reads/{sample}",
         log: "{path}/{sample}/trim.log"
         output: files_R1 = expand("{{path}}/{{sample}}/amplicons_reads/{{sample}}_{amp}_{R}.fastq.gz",amp=AMPLICONS,R=["R1","R2"]),
-                amp_tabl = temp("{path}/{sample}/{sample}_amp_cnt_init.tsv")
+                amp_tabl = "{path}/{sample}/{sample}_amp_cnt_init.tsv"
         shell: """
             {SCRIPTS}/trim_primer_parts.py {input.sam} {DB_PRIMER} {params} --table {output.amp_tabl} --log {log}
             """
@@ -312,7 +312,8 @@ rule tabulate_amp_merged:
             os.system("sed -i '/^%s/d' %s"%(dummy,file.replace(".m6",".sam")))
             if getsize(file)!=0:
                 amp = basename(file).split("%s_"%sample)[1].replace(".m6","")
-                nb_reads = len({line.rstrip().split("\t")[0] for line in open(file)})
+                headers = {line.rstrip().split("\t")[0] for line in open(file)}
+                nb_reads = sum([int(header.split(";size=")[1]) for header in headers])
                 index_amp = sorted_amp.index(amp)
                 matrix[0,index_amp]=int(nb_reads)
         # output cnts
@@ -328,7 +329,6 @@ rule select_sample_and_amp:
         nb_amp = len(AMPLICONS)
         sorted_amp = sorted(AMPLICONS)
         sorted_samples = sorted([basename(dirname(file)) for file in input["cnts"]])
-        print(sorted_samples)
         matrix = np.zeros((len(input["cnts"]),nb_amp))
         amp_to_length = {amp:np.mean([len(seq) for header,seq in sfp(open("%s/refs/%s_amps_seqs/%s.fa"%(EXEC_DIR,PRIMER,amp)))]) for amp in sorted_amp}
         sample_to_amp = defaultdict(list)
@@ -353,11 +353,11 @@ if DATATYPE=="p-reads":
     rule vsearch_mergepair:
         input: R1="{path}_R1.fastq.gz",
                R2="{path}_R2.fastq.gz"
-        output:temp("{path}_merged.fasta")
+        output:temp("{path}.merged")
         shell:"vsearch --threads 1 --fastq_mergepairs {input.R1} --reverse {input.R2} --fastq_minovlen 5 --fastaout {output} || touch {output}" # overlap is filtered for and all paired reads overlap at least by 1
     rule deal_with_low_overlap:
-        input: merged = "{path}_merged.fasta"
-        output:"{path}.fasta"
+        input: merged = "{path}.merged"
+        output:"{path}.todereplicate"
         run:
             # we do a manual merging of paired reads overlapping with 0-5 bases. I'll just keep the better qual one if bases are different
             # concat that to the vsearch merged ones.
@@ -389,11 +389,14 @@ if DATATYPE=="p-reads":
                 handle.write(open(input["merged"]).read())
 else:
     rule fastq_to_fasta:
-        input: "{file}.fastq.gz"
-        output: temp("{file}.fasta")
+        input: "{path}.fastq.gz"
+        output: temp("{path}.todereplicate")
         shell: "seqtk seq -a {input} > {output}"
 
-
+rule dereplication:
+    input: "{path}.todereplicate"
+    output: temp("{path}.fasta")
+    shell: "vsearch --derep_fulllength {input} --output {output} -sizeout"
 
 rule subsample_reads:
     input: "{path}.fasta"
@@ -418,35 +421,25 @@ rule vsearch_all_merged:
 #-------------------- Simple EM with error rate learning ------------------
 rule cat_merged_m6:
     input: prior_step = "{path}/selected_amp.tsv",
-           fasta = lambda w:["%s/samples/%s/amplicons_reads/%s_%s.fasta"%(w.path,w.sample,w.sample,amp) for amp in RELEVANT_AMP[w.sample]],
            m6 = lambda w:["%s/samples/%s/amplicons_reads/%s_%s.m6"%(w.path,w.sample,w.sample,amp) for amp in RELEVANT_AMP[w.sample]],
            sam = lambda w:["%s/samples/%s/amplicons_reads/%s_%s.sam"%(w.path,w.sample,w.sample,amp) for amp in RELEVANT_AMP[w.sample]]
     output: fasta = "{path}/samples/{sample}/{sample}.fasta",
             m6 = temp("{path}/samples/{sample}/amplicons_reads/all_amp.m6"),
             sam = temp("{path}/samples/{sample}/amplicons_reads/{sample}_all_refs.sam")
     shell: """
-           cat {input.fasta} > {output.fasta}
            cat {input.m6} > {output.m6}
            cat {input.sam} > {output.sam}
            """
 
-rule get_read_len:
-    input: "{path}.fasta"
-    output: "{path}_readlen.len"
-    run: 
-        with open(output[0],"w") as handle:
-            handle.writelines("%s\t%s\n"%(header,len(seq)) for header,seq in sfp(open(input[0])))
-
 
 rule EMP_aggregated_merged:
     input: m6 = "{path}/samples/{sample}/amplicons_reads/all_amp.m6",
-           read_len = "{path}/samples/{sample}/{sample}_readlen.len",
            mapping = "%s/amp_name_mapping.tsv"%DB_AMP
     output: expand("{{path}}/samples/{{sample}}/EM_runs/{{sample}}_total{ext}.csv",ext=["_pi_est", "_z_est","_amp_pi_est"])
     params: out = "{path}/samples/{sample}/EM_runs/{sample}_total",
             filt = (DB_RUN_A!="")*("-a "+DB_RUN_A+" ")+(DB_RUN_G!="")*("-r "+DB_RUN_G+" ")
     shell: """
-           python  {SCRIPTS}/CovidEM_VIN.py {input.m6} {input.read_len} {input.mapping} {params.out} {params.filt}
+           python  {SCRIPTS}/CovidEM_VIN.py {input.m6} {input.mapping} {params.out} {params.filt}
            touch {output}
            """
 
@@ -658,8 +651,9 @@ rule varscan :
 
 
 
-
-
+# -------------------------------------
+# ------ clean files ------------------ 
+# -------------------------------------
 
 
 
