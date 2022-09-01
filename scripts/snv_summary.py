@@ -58,6 +58,8 @@ def get_pos_base_percent(ROOT,prprt,RANGE):
         if (len(base)>1)|(base not in {"A","T","G","C"}):
             continue
         variant = variant.split(" ")[0]
+        if variant not in variants:
+            continue
         if sum(prprt[variants.index(variant),:])==0:
             continue
         pos = int(pos)

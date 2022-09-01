@@ -50,6 +50,7 @@ DB_TREE_REL = config["database"]["tree_rel"]
 DB_AMP = config["database"]["amplicons"]
 MAX_READS = config["max_reads_per_amp"]
 MIN_READS = config["min_reads_per_amp"]
+MIN_DEREPLICATED_CNT = config["min_dereplicated_count"] # default value is 2, to remove singletons
 MIN_PID = 0.95
 MIN_CNT = 10
 
@@ -175,7 +176,9 @@ rule iqtree_building:
 rule extract_amplicons:
     input: DB_MSA
     output: expand("%s/{amp}.fa"%DB_AMP,amp=AMPLICONS),
-            "%s/amp_name_mapping.tsv"%DB_AMP
+            "%s/amp_name_mapping.tsv"%DB_AMP,
+            "%s/refs/db_stat.tsv"%EXEC_DIR,
+            "%s/refs/db_snv.tsv"%EXEC_DIR
     shell: """
         {SCRIPTS}/extract_amplicons.py {DB_PRIMER} {input} {DB_AMP} -s {EXEC_DIR}/refs  """
 
@@ -395,8 +398,20 @@ else:
 
 rule dereplication:
     input: "{path}.todereplicate"
-    output: temp("{path}.fasta")
-    shell: "vsearch --derep_fulllength {input} --output {output} -sizeout"
+    output: temp("{path}.tofilter")
+    shell: "vsearch --threads 1 --derep_fulllength {input} --output {output} -sizeout"
+
+rule remove_singletons:
+    input: filt = "{path}.tofilter"
+    output: fa = temp("{path}.fasta")
+    run:
+        with open(input["filt"]) as handle, open(output["fa"],"w") as handle_w:
+            for header,seq in sfp(handle):
+                nb = int(header.split()[0].split(";size=")[1])
+                if nb<MIN_DEREPLICATED_CNT:
+                    continue
+                handle_w.write(">%s\n%s\n"%(header,seq))
+
 
 rule subsample_reads:
     input: "{path}.fasta"
@@ -423,8 +438,7 @@ rule cat_merged_m6:
     input: prior_step = "{path}/selected_amp.tsv",
            m6 = lambda w:["%s/samples/%s/amplicons_reads/%s_%s.m6"%(w.path,w.sample,w.sample,amp) for amp in RELEVANT_AMP[w.sample]],
            sam = lambda w:["%s/samples/%s/amplicons_reads/%s_%s.sam"%(w.path,w.sample,w.sample,amp) for amp in RELEVANT_AMP[w.sample]]
-    output: fasta = "{path}/samples/{sample}/{sample}.fasta",
-            m6 = temp("{path}/samples/{sample}/amplicons_reads/all_amp.m6"),
+    output: m6 = temp("{path}/samples/{sample}/amplicons_reads/all_amp.m6"),
             sam = temp("{path}/samples/{sample}/amplicons_reads/{sample}_all_refs.sam")
     shell: """
            cat {input.m6} > {output.m6}
@@ -439,7 +453,7 @@ rule EMP_aggregated_merged:
     params: out = "{path}/samples/{sample}/EM_runs/{sample}_total",
             filt = (DB_RUN_A!="")*("-a "+DB_RUN_A+" ")+(DB_RUN_G!="")*("-r "+DB_RUN_G+" ")
     shell: """
-           python  {SCRIPTS}/CovidEM_VIN.py {input.m6} {input.mapping} {params.out} {params.filt}
+           {SCRIPTS}/CovidEM_VIN_U2.py {input.m6} {input.mapping} {params.out} {params.filt}
            touch {output}
            """
 
@@ -647,8 +661,6 @@ rule varscan :
     varscan pileup2snp {input} > {output.snv}
     varscan pileup2indel {input} > {output.indel}
     """
-
-
 
 
 # -------------------------------------
