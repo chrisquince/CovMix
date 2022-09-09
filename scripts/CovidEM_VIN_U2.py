@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import numpy as np
 from numpy.random import default_rng
 import itertools
@@ -40,7 +41,9 @@ class MixtureEM_VI():
     
     MIN_Z = 1.0e-9
  
-    def __init__(self, N, R, A, mismatchMatrix, matchMatrix, mapA, piPrior = DEFAULT_PI_PRIOR, initDelta = DEFAULT_INIT_DELTA):
+    def __init__(self, N, R, A, mismatchMatrix, matchMatrix, mapA, F, piPrior = DEFAULT_PI_PRIOR, initDelta = DEFAULT_INIT_DELTA):
+    
+        self.F = F
     
         self.R = R  # No. of references
     
@@ -103,7 +106,6 @@ class MixtureEM_VI():
             fChange = abs(elbo - lastElbo)
             
             fString = str(nIter) + ',' + str(elbo) + ',' + str(fChange)
-            
             logging.info(fString)
     
             lastElbo = elbo
@@ -128,11 +130,13 @@ class MixtureEM_VI():
 
         self.expZ = expZ / row_sums[:, np.newaxis]
         
+        self.expZF = self.expZ*self.F[:,np.newaxis]
+        
     def updatePi(self):
     
         #Update Pi
-        
-        self.alphaPi = self.piPrior + np.sum(self.expZ,axis=0)        
+
+        self.alphaPi = self.piPrior + np.sum(self.expZF,axis=0)        
         
         self.alphaSum = np.sum(self.alphaPi)
         
@@ -150,11 +154,11 @@ class MixtureEM_VI():
     
     def updateDelta(self):
         
-        tM = self.expZ*self.matchMatrix
+        tM = self.expZF*self.matchMatrix
         
         self.mMatch = np.sum(np.dot(np.transpose(tM),self.mapA),axis=0) + self.deltaOnePrior
        
-        tM = self.expZ*self.mismatchMatrix
+        tM = self.expZF*self.mismatchMatrix
         
         self.mMisMatch = np.sum(np.dot(np.transpose(tM),self.mapA),axis=0) + self.deltaPrior
     
@@ -177,19 +181,19 @@ class MixtureEM_VI():
     
         tM = np.dot(self.mapA, self.logExpDelta)
     
-        expLogLike = np.sum(self.expZ*self.mismatchMatrix*tM[:,np.newaxis]) 
+        expLogLike = np.sum(self.expZF*self.mismatchMatrix*tM[:,np.newaxis]) 
     
         tM = np.dot(self.mapA, self.logExpOneDelta)
         
-        expLogLike += np.sum(self.expZ*self.matchMatrix*tM[:,np.newaxis])
+        expLogLike += np.sum(self.expZF*self.matchMatrix*tM[:,np.newaxis])
         
-        expLogZ = np.sum(np.dot(self.expZ,self.logExpPi))
+        expLogZ = np.sum(np.dot(self.expZF,self.logExpPi))
         
         expLogPi = lngamma(self.piPrior*self.R) - self.R*lngamma(self.piPrior) + (self.piPrior - 1.)*np.sum(self.logExpPi)
         
         expLogDelta = self.A*(lngamma(self.deltaPC) - lngamma(self.deltaPrior) - lngamma(self.deltaOnePrior)) + np.sum(self.deltaPrior*self.logExpDelta) + np.sum(self.deltaOnePrior*self.logExpOneDelta)
         
-        minZ = self.expZ[self.expZ > MixtureEM_VI.MIN_Z]
+        minZ = self.expZF[self.expZF > MixtureEM_VI.MIN_Z]
         
         expLogQZ = np.sum(minZ*np.log(minZ))
         
@@ -208,7 +212,7 @@ class MixtureEM_VI():
     
     def getAmpliconWeights(self):
     
-        ampPi = np.dot(np.transpose(self.expZ),self.mapA)
+        ampPi = np.dot(np.transpose(self.expZF),self.mapA)
     
         return ampPi
     
@@ -265,8 +269,6 @@ def main(argv):
 
     parser.add_argument("blast_file_m", help="merged alignments in tab format")
     
-    parser.add_argument("read_lengths_m", help="read lengths tab delimited")
-    
     parser.add_argument("mapping_file", help="mapping of amplicons to genomes")
     
     parser.add_argument("output_stub", help="file stub for output")
@@ -279,12 +281,14 @@ def main(argv):
     
     parser.add_argument("-m","--max_iter", default=500,type=int,help = 'No. of iterations')
     
+    parser.add_argument("-mf","--min_freq", default=1,type=int,help = 'Minimum unique read frequency')
+    
     parser.add_argument("-i","--min_read_length", default=0,type=int,help = 'Minimum merged read length for alignment to be used')
     
     args = parser.parse_args()
     
     #Set up logger
-   # import ipdb; ipdb.set_trace()
+    #import ipdb; ipdb.set_trace()
     logging.basicConfig(filename=args.output_stub+'.log',  filemode='w',
                             format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s',
                             datefmt='%H:%M:%S',
@@ -350,20 +354,8 @@ def main(argv):
     
     
     read_lengths = {}
+    read_freqs = {}
     
-    logging.info('Reading read length file')
-    with open(args.read_lengths_m,'r') as f:
-        
-        for line in f:
-        
-            line = line.rstrip()
-    
-        
-            toks=line.split('\t')
-    
-            read_lengths[toks[0]] = int(toks[1])
-    
-
     queries = set()
     
     errorDict = defaultdict(dict) 
@@ -389,6 +381,10 @@ def main(argv):
             
                 query = toks[0]
             
+                freq = int(query[query.find('size=') + 5:])
+                        
+                #A00892:170:HKV2LDRXY:2:2101:18168:12696;size=664
+            
                 subj = toks[1]
              
                 length = int(toks[12])
@@ -398,8 +394,8 @@ def main(argv):
                 mismatch = int(round(length*(1 - pid)))# int(toks[4]) + int(toks[5])
             
                 subjectAmp = subj.split('_')[1]
-            
-                if length > args.min_read_length: 
+                        
+                if length > args.min_read_length and freq >= args.min_freq: 
                     
                     if subjectAmp in amplicon_filter or not bAmpliconFilter:
                         
@@ -412,11 +408,17 @@ def main(argv):
                                     
                                 queries.add(query)
                                 
+                                read_freqs[query] = freq
+                                
+                                read_lengths[query] = length
+                                
                                 ampReadMap[query] = subjectAmp
                                 
-                                ampFreq[subjectAmp] += 1   
+                                ampFreq[subjectAmp] += read_freqs[query]   
                                 
                                 subjAmps.add(subjectAmp)
+                                
+                                
                                     
                             readMaps[query][subj] = (mismatch,length - mismatch)
                     
@@ -479,7 +481,8 @@ def main(argv):
     read_list = sorted(list(queries))
     
     N = len(queries) # number of reads
-    print("queries %s"%N)
+    F = sum(read_freqs.values())
+    print("queries %d %d"%(N,F))
     ampl_list = sorted(list(subjAmps))
     
     A = len(ampl_list)
@@ -526,9 +529,15 @@ def main(argv):
             logging.info('Processed ' + str(r) + ' reads')
     
     
-    
-    mixtureEM =  MixtureEM_VI(N, R, A, mismatchMatrix, matchMatrix, ampMap)
-    
+    F = np.zeros(N)
+    for r in range(N):
+        
+        read_id = read_list[r]
+   
+        F[r] = int(read_freqs[read_id])
+        
+    mixtureEM =  MixtureEM_VI(N, R, A, mismatchMatrix, matchMatrix, ampMap,F)
+
     logging.info('Running variational inference')
     mixtureEM.update(args.max_iter)
     
@@ -559,15 +568,15 @@ def main(argv):
     
     matchMatrix_Filt = matchMatrix[:,FilterRefs] 
     
-    F = np.sum(FilterRefs)
+    NF = np.sum(FilterRefs)
     logging.info(str(F) + ' genomes after filtering')
     
-    if F > 0:
+    if NF > 0:
         
     
         filt_ref_list = list(compress(ref_list, FilterRefs.tolist()))
     
-        mixtureEM_Filt =  MixtureEM_VI(N, F, A, mismatchMatrix_Filt, matchMatrix_Filt, ampMap)
+        mixtureEM_Filt =  MixtureEM_VI(N, NF, A, mismatchMatrix_Filt, matchMatrix_Filt, ampMap,F)
     
         logging.info('Run VI post filtering')
         
