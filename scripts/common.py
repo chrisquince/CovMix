@@ -6,16 +6,22 @@ try:
 except:
     pass
 
+from Bio.SeqIO.FastaIO import SimpleFastaParser as sfp
+from os.path import basename, dirname, isfile
 from collections import defaultdict
 from subprocess import Popen, PIPE
-from os.path import basename, dirname, isfile
+import subprocess
+import numpy as np
+import hashlib
 import os.path
 import sys
 import os
 import re
 
 
-default_values = {"trimming_strictness":1,"Proportion_Threshold":0.025, "data_regex":["*"],"threads":20,"min_reads_per_amp":40,"max_reads_per_amp":1000,"amplicon_to_run":"","genome_to_run":"","min_dereplicated_count":1}
+
+
+default_values = {"trimming_strictness":1,"Proportion_Threshold":0.025, "data_regex":["*"],"threads":20,"min_reads_per_amp":40,"max_reads_per_amp":1000,"amplicon_to_run":"","genome_to_run":"","min_dereplicated_count":1,"plot_tree":False}
 default_values_v2 = lambda path,primer:{
 "database":
     {
@@ -160,3 +166,88 @@ def assess_nanopore_samples(SAMPLES):
         sys.exit("Samples folder: "+" - ".join(Files_empty)+" is less than 10 lines long, maybe empty, please remove these folder from analysis")
     if len(SAMPLES)==0:
         sys.exit("No sample folder has been detected, please ensure the path corresponding to data lead to a folder containing 1 folder per sample.")
+
+
+# -------- misc python utils --------
+def matrix_write(matrix,file_name,row_names,col_names) :
+    with open(file_name,"w") as handle:
+        handle.write("/\t%s\n"%"\t".join(col_names))
+        handle.writelines('%s\t%s\n'%(row_names[index],"\t".join(["{0:4g}".format(nb) for nb in line])) for index,line in enumerate(matrix))
+
+
+def load_matrix(file,sep="\t",sample_order=None,strain_order=None) :
+    with open(file) as handle :
+        header = next(handle).rstrip().split(sep)[1:]
+        strains = []
+        matrix = []
+        for line in handle : 
+            splitlines = line.rstrip().split(sep)
+            strains.append(splitlines[0])
+            matrix.append(list(map(float,splitlines[1:])))
+    matrix = np.array(matrix)
+    if sample_order :
+        reorder_samples = [header.index(sample) for sample in sample_order]
+        reorder_strain = [strains.index(strain) for strain in strain_order]
+        return matrix[:,reorder_samples][reorder_strain,:]
+    else : 
+        return matrix,header,strains
+
+
+def correct_line(line,amp_def,refname):
+    # need to add deletions to indicate where al starts
+    splitline = line.split("\t")
+    ref = splitline[2].split("_var")[0]
+    amp_start,amp_end = amp_def[ref] # this is zero based
+    new_start = str(int(splitline[3])+amp_start) # this is 1 based
+    splitline[3] = new_start
+    splitline[2] = refname
+    # it is extremly likely you get a flag 256: not primary alignment from the fact we do an alignment to everyting. So, If a better ref exist, refname will never be the primary al.
+    # this is not an issue save that bam readcount ignore anything 256
+    # hence we change the sam flag to 0
+    splitline[1] = str(0)
+    return "\t".join([el for el in splitline if "MD:" not in el])
+
+
+def print_task_name(name):
+    def sub_print(name):
+        padding = int((80-len(name)-4)/2)
+        rest = 80-len(name)-2*padding-4
+        print("-"*padding+2*" "+name+(2+rest)*" "+padding*'-')
+    print('-'*80)
+    if len(name)>60:
+        sname = name.split(" ")
+        split_size = next(float(len(name))/i for i in range(2,100) if (float(len(name))/i)<40)
+        to_print = sname
+        while to_print:
+            if len(" ".join(to_print))<split_size:
+                sub_print(" ".join(to_print))
+                to_print = []
+            else:
+                index_split = next(index for index,n in enumerate(to_print) if len(" ".join(to_print[:index]))>=split_size)
+                sub_print(" ".join(to_print[:index_split]))
+                to_print = to_print[index_split:]
+    else:
+        sub_print(name)
+    print('-'*80)
+
+def call_snake(params,name="",dag=""):
+    if name:
+        print_task_name(name)
+    call_snake.nb+=1
+    if dag:
+        p1=Popen(params +["--rulegraph"]+ extra_params + config + config_add, stdout=PIPE, stderr=sys.stderr)
+        p2=Popen(["dot","-Tpng"],stdin=p1.stdout, stdout=PIPE, stderr=sys.stderr)
+        with open(dag.replace(".png",str(call_snake.nb)+".png"),"bw") as f :
+            f.write(p2.communicate()[0])
+    subprocess.check_call(params, stdout=sys.stdout, stderr=sys.stderr)
+
+
+
+def shell_cmd(cmd,name,print_std=False):
+    process = Popen(cmd, stdout=PIPE, stderr=PIPE,shell=True)
+    stdout,stderr = process.communicate()
+    if process.returncode:
+        print("task %s exited while trying execute the following command:\n%s\nerror message:\n  %s"%(name,cmd,stderr.decode('UTF-8')))
+        sys.exit(1)
+    if print_std:
+        print(f'task {name} gave the following output\n{stdout}\n{stderr}')

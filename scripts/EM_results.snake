@@ -1,0 +1,205 @@
+include: "common.snake"
+
+
+wildcard_constraints:
+    amp ="|".join(AMPLICONS),
+    sample = "|".join(SAMPLES)
+
+
+rule results:
+    input: expand("%s/samples/{sample}/amplicons_reads/.cleaning.done2"%EXEC_DIR, sample=SAMPLES),
+           expand("%s/results/{fig}.pdf"%EXEC_DIR,fig = FIGS),
+           "%s/results/proportions.tsv"%EXEC_DIR
+
+
+# -------------- Filter amp and sample to run ----------------------
+rule tabulate_amp_merged:
+    input: cnts = "{path}/{sample}_amp_cnt_init.tsv",
+           global_al = expand("{{path}}/amplicons_reads/{{sample}}_{amp}.m6",amp=AMPLICONS)
+    output: cnt = "{path}/{sample}_amp_cnt.tsv"
+    message: "count the number of reads mapped to each amplicon"
+    run:
+        nb_amp = len(AMPLICONS)
+        sorted_amp = sorted(AMPLICONS)
+        sample = wildcards["sample"]
+        matrix = np.zeros((1,nb_amp))
+        amp_to_length = {amp:np.mean([len(seq) for header,seq in sfp(open("%s/refs/%s_amps_seqs/%s.fa"%(EXEC_DIR,PRIMER,amp)))]) for amp in sorted_amp}
+        dummy = "need_at_least_one_entry_so_vsearch_doesnt_throw_an_error"
+        for file in input["global_al"]:
+            os.system("sed -i '/^%s/d' %s"%(dummy,file))
+            os.system("sed -i '/^%s/d' %s"%(dummy,file.replace(".m6",".sam")))
+            if getsize(file)!=0:
+                amp = basename(file).split("%s_"%sample)[1].replace(".m6","")
+                headers = {line.rstrip().split("\t")[0] for line in open(file)}
+                nb_reads = sum([int(header.split(";size=")[1]) for header in headers])
+                index_amp = sorted_amp.index(amp)
+                matrix[0,index_amp]=int(nb_reads)
+        # output cnts
+        matrix_write(matrix,output["cnt"],[sample],map(str,sorted_amp))
+
+
+rule select_sample_and_amp:
+    input: cnts = expand("{{path}}/samples/{sample}/{sample}_amp_cnt.tsv",sample=SAMPLES),
+           tidy = "%s/refs/%s_amps_seqs/tidy_done"%(EXEC_DIR,PRIMER),
+    output: selec = "{path}/selected_amp.tsv",
+            cnt = "{path}/results/amp_cnts.tsv"
+    run:
+        nb_amp = len(AMPLICONS)
+        sorted_amp = sorted(AMPLICONS)
+        sorted_samples = sorted([basename(dirname(file)) for file in input["cnts"]])
+        matrix = np.zeros((len(input["cnts"]),nb_amp))
+        amp_to_length = {amp:np.mean([len(seq) for header,seq in sfp(open("%s/refs/%s_amps_seqs/%s.fa"%(EXEC_DIR,PRIMER,amp)))]) for amp in sorted_amp}
+        sample_to_amp = defaultdict(list)
+        for file in input["cnts"]:
+            sample = basename(dirname(file))
+            index_sample = sorted_samples.index(sample)
+            cnts,sorted_amp,_ = load_matrix(file,sep="\t")
+            for index,amp in enumerate(sorted_amp):
+                if cnts[0,index]>=MIN_READS:
+                    sample_to_amp[sample].append(amp)
+            matrix[index_sample,:] = cnts
+
+        #output results
+        with open(output['selec'],"w") as handle:
+            handle.writelines("%s\t%s\n"%(sample,"\t".join(amps)) for sample,amps in sample_to_amp.items())
+        matrix_write(matrix,output["cnt"],sorted_samples,sorted_amp)
+
+
+#-------------------- Simple EM with error rate learning ------------------
+rule cat_merged_m6:
+    input: prior_step = "{path}/selected_amp.tsv",
+           m6 = lambda w:["%s/samples/%s/amplicons_reads/%s_%s.m6"%(w.path,w.sample,w.sample,amp) for amp in RELEVANT_AMP[w.sample]],
+           sam = lambda w:["%s/samples/%s/amplicons_reads/%s_%s.sam"%(w.path,w.sample,w.sample,amp) for amp in RELEVANT_AMP[w.sample]]
+    output: m6 = temp("{path}/samples/{sample}/amplicons_reads/all_amp.m6"),
+            sam = "{path}/samples/{sample}/amplicons_reads/{sample}_all_refs.sam"
+    message: "concatenation of amlicon wise sam/m6 files."
+    shell: """
+           cat {input.m6} > {output.m6}
+           cat {input.sam} > {output.sam}
+           """
+
+rule EMP_aggregated_merged:
+    input: m6 = "{path}/samples/{sample}/amplicons_reads/all_amp.m6",
+           mapping = "%s/amp_name_mapping.tsv"%DB_AMP
+    output: expand("{{path}}/samples/{{sample}}/EM_runs/{{sample}}_total{ext}.csv",ext=["_pi_est", "_z_est","_amp_pi_est","ref_map"])
+    params: out = "{path}/samples/{sample}/EM_runs/{sample}_total",
+            filt = (DB_RUN_A!="")*("-a "+DB_RUN_A+" ")+(DB_RUN_G!="")*("-r "+DB_RUN_G+" ")
+    shell: """
+           {SCRIPTS}/CovidEM_VIN_U2.py {input.m6} {input.mapping} {params.out} {params.filt}
+           touch {output}
+           """
+
+# -------------------- create a results figs ------------------
+ruleorder: plot_proportions >plot_freq_tree>plot_Amplicons> merge_pdf
+
+rule plot_proportions:
+    input : pi = "{path}/samples/{sample}/EM_runs/{sample}_total_pi_est.csv",
+            ambi = "{path}/samples/{sample}/EM_runs/{sample}_totalref_map.csv"
+    output: "{path}/samples/{sample}/Proportions.pdf"
+    shell:"{SCRIPTS}/plot_proportions.R {input.pi} {input.ambi} {THRESHOLD} {output}"
+
+rule plot_Amplicons:
+    input : "{path}/samples/{sample}/EM_runs/{sample}_total_amp_pi_est.csv"
+    output: "{path}/samples/{sample}/amplicons_wise_freq.pdf"
+    shell:"{SCRIPTS}/AmpZZ.R {input} {output}"
+
+
+rule iqtree_building:
+    input: DB_MSA
+    params : "%s/refs/tree/db_tree.nwk"%EXEC_DIR
+    output: DB_TREE
+    log: "%s/refs/tree/iqtree.log"%EXEC_DIR
+    threads:THREADS
+    shell:"""
+          iqtree -s {input} -m GTR+G -blmin 1e-9 -nt AUTO -ntmax {threads}  > {log}
+          mv {input}.treefile {output}
+          """
+
+rule plot_freq_tree:
+    input : pi = "{path}/samples/{sample}/EM_runs/{sample}_total_pi_est.csv",
+            tree = DB_TREE
+    output: "{path}/samples/{sample}/tree_freq.pdf"
+    shell:"{SCRIPTS}/plot_tree.R {input.pi} {input.tree} {output}"
+
+
+# -------------------- create a results folder ------------------
+rule merge_pdf:
+    input : lambda w:sorted(["%s/samples/%s/%s.pdf"%(w.path,sample,w.fig) for sample in RELEVANT_AMP],key=lambda x:basename(dirname(x))),
+    output: "{path}/results/{fig}.pdf",
+    shell: "pdfunite {input} {output}"
+
+rule Pi_overall_table:
+    input : pi = lambda w:["%s/samples/%s/EM_runs/%s_total_pi_est.csv"%(w.path,sample,sample) for sample in RELEVANT_AMP],
+            ambi = lambda w:["%s/samples/%s/EM_runs/%s_totalref_map.csv"%(w.path,sample,sample) for sample in RELEVANT_AMP],
+            refs = "{path}/refs/db_stat.tsv"
+    output: prop = "{path}/results/proportions.tsv",
+            degen = "{path}/results/degen_summary.tsv"
+    run:
+        refs = {line.rstrip().split("\t")[0] for index,line in enumerate(open(input["refs"])) if index>0}
+        sample_to_file = {basename(file).replace("_total_pi_est.csv",""):file for file in input["pi"]}
+        # some bad runs don't really have a filtered output since there is nothing left after filtering, we require the output of CovidEM_VIN to be only total_pi_est instead of total_Filt_pi_est but then when possible use the Filtered output 
+        sample_to_file = {sample:file.replace("total_","total_Filt_") if os.path.exists(file.replace("total_","total_Filt_")) else file for sample,file in sample_to_file.items()}
+        sorted_refs = sorted(refs)
+        sorted_samples = sorted(sample_to_file)
+
+
+        # get mapping of ref to representative
+        sample_ref_to_rep = defaultdict(dict)
+        sample_rep_to_ref = defaultdict(dict)
+        degen_summary = defaultdict(list)
+        for file in input["ambi"]:
+            sample = basename(file).replace("_totalref_map.csv","")
+            for line in open(file):
+                sline = line.rstrip().split(",")
+                representative = sline[1]
+                members = sline[3].split("$")
+                sample_rep_to_ref[sample][representative] = members
+                if len(members)>1:
+                    degen_summary[sample].append([representative]+members)
+                for member in members:
+                    sample_ref_to_rep[sample][member] = representative
+
+        # build a degneracy matrix
+        degen_mat = [["/"]+sorted_refs]
+        for sample in sorted_samples:
+            degen_mat.append([sample]+[sample_ref_to_rep[sample][ref] for ref in sorted_refs])
+
+        # build a matrix
+        mat = np.zeros((len(sorted_samples),len(refs)))
+        for index,sample in enumerate(sorted_samples):
+            with open(sample_to_file[sample]) as handle:
+                _=next(handle)
+                for line in handle:
+                    _,ref,percent,std = line.rstrip().split(",")
+                    for member in sample_rep_to_ref[sample][ref]:
+                        mat[index,sorted_refs.index(member)]=float(percent)
+
+        # write a matrix
+        matrix_write(mat,output["prop"],sorted_samples,sorted_refs)
+
+        # # write a matrix
+        # with open(output["degen"],"w") as handle:
+        #     handle.writelines("%s\n"%"\t".join(line) for line in degen_mat)
+
+        # write a matrix
+        with open(output["degen"],"w") as handle:
+            handle.write("sample\trepresentative\tdegenerated_lineages\n")
+            for sample in sorted_samples:
+                for group in degen_summary[sample]:
+                    handle.write("%s\t%s\t%s\n"%(sample,group[0],"|----|".join(group[1:])))
+
+# -------------------------------------
+# ------ clean files ------------------ 
+# -------------------------------------
+
+rule clean_data:
+    input: expand("%s/results/{fig}.pdf"%EXEC_DIR,fig = FIGS),
+           "%s/results/proportions.tsv"%EXEC_DIR
+    output: "{path}/amplicons_reads/.cleaning.done2"
+    params: "{path}/amplicons_reads"
+    shell: """
+    rm {params}/*{{[0-9][0-9],[0-9]}}.sam || touch {output}
+    rm {params}/*{{[0-9][0-9],[0-9]}}.m6 || touch {output}
+    rm {params}/*.fasta || touch {output}
+    touch {output}
+    """

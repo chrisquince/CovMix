@@ -1,0 +1,137 @@
+include: "common.snake"
+
+wildcard_constraints:
+    amp ="|".join(AMPLICONS),
+    sample = "|".join(SAMPLES)
+
+rule results:
+	input:	"%s/snv/snv_table.tsv"%EXEC_DIR,
+             expand("%s/samples/{sample}/varscan/{sample}_snv.tsv"%EXEC_DIR,sample=SAMPLES),
+
+
+# ----------------------------------------------------------------
+# -------------------- SNV part of the pipeline ------------------
+# ----------------------------------------------------------------
+
+
+
+rule remove_other_refs:
+    input: map = "%s/amp_name_mapping.tsv"%DB_AMP,
+           sam = "{path}/{sample}_all_refs.sam"
+    output: sam = "{path}/{sample}.sam"
+    run:
+        ref_names = {line.rstrip().split("\t")[1] for line in open(input["map"]) if refname in line}
+        with open(output["sam"],"w") as handle:
+            for line in open(input["sam"]):
+                if line[0]=="@":
+                    continue
+                ref = line.split("\t")[2]
+                if ref in ref_names:
+                    handle.write(line)
+
+
+rule fix_sam:
+    input: sam = '{path}.sam'
+    output: sam = "{path}_fixed.sam"
+    run:
+        amp_def = defaultdict(lambda:[0,0])
+        for line in open(DB_PRIMER):
+            splitline = line.rstrip().split("\t")
+            primer = splitline[3]
+            if "_alt" in primer:
+                continue
+            amp = primer.replace("_LEFT","").replace("_RIGHT","")
+            if "_LEFT" in primer:
+                amp_def[amp][0] = int(splitline[2])
+            if "_RIGHT" in primer:
+                amp_def[amp][1] = int(splitline[1])
+
+        new_headers = generate_header()
+        with open(input["sam"]) as handle:
+            with open(output["sam"],"w") as handle_w:
+                handle_w.writelines("%s\n"%"\t".join(line) for line in new_headers)
+                for line in handle:
+                    if line[0]=="@":
+                        continue
+                    else:
+                        handle_w.write(correct_line(line,amp_def,refname))
+
+rule sam_to_bam:
+    input: "{path}_fixed.sam" 
+    output:"{path}.bam"
+    shell: "samtools view -b -h {input}| samtools sort - > {output}"
+
+rule ref_index:
+    input: "{path}" 
+    output:"{path}.fai"
+    shell: "samtools faidx {input}"
+
+rule bam_readcount:
+    input:
+        fai = "%s.fai"%DB_REF,
+        bam = "{path}.bam",
+    output: "{path}.cnt.gz"
+    log:
+        "{path}.log"
+    shell: """
+        samtools index {input.bam}
+        bam-readcount -w 1 -f {DB_REF} {input.bam} 2> {log} | gzip > {output}
+        """
+
+rule build_amp_coordinates:
+    output: coord = "{path}/ref_coord.tsv"
+    run:
+        with open(output["coord"],"w") as handle:
+            handle.write("%s,%s,%s,%s,%s,1"%(refname,refname,0,len(refseq),refname))
+
+rule extract_counts:
+    input:
+        expand("{{path}}/samples/{sample}/amplicons_reads/{sample}.cnt.gz", sample=SAMPLES),
+        coords = "{path}/snv/ref_coord.tsv"
+    output:
+        "{path}/snv/count_raw.csv"
+    params:
+        input_dir = "{path}/snv/cnts"
+    log:
+        "{path}/snv/extract_counts.log"
+    shell: """
+    mkdir -p {wildcards.path}/snv/cnts
+    ln -sf {input} {wildcards.path}/snv/cnts/
+    python {SCRIPTS}/ExtractCountFreqGenes.py {input.coords} {params.input_dir} --output_file {output} &>> {log}
+        """
+rule filter_variants:
+    input: "{path}/count_raw.csv"
+    output: cnts = "{path}/count.csv",
+            fold = "{path}/filter/counts_tran_df.csv"
+    params: stub = "{path}/filter/counts_"
+    shell:  """
+    {SCRIPTS}/Variant_Filter.py {input} -o {params.stub} 
+    mv {params.stub}sel_var.csv {output.cnts}
+    """
+
+
+rule plot_and_snv_table:
+    input: "{path}/snv/count.csv",
+           "{path}/refs/db_snv.tsv",
+           "{path}/results/proportions.tsv",
+    output: "{path}/snv/snv_table.tsv"
+    shell: "{SCRIPTS}/snv_summary.py {EXEC_DIR}"
+
+
+# -------------------------------------
+# -------------- VARSCAN --------------
+# -------------------------------------
+
+rule mpilleup :
+    input: "{path}/{sample}_trimmed.sam"
+    output: "{path}/varscan/{sample}.pileup"
+    shell: "samtools view -b {input} | samtools mpileup -f {DB_REF} - >{output}"
+
+rule varscan :
+    input: "{path}.pileup"
+    output: snv = "{path}_snv.tsv",
+            indel = "{path}_indel.tsv"
+    shell: """
+    varscan pileup2snp {input} > {output.snv}
+    varscan pileup2indel {input} > {output.indel}
+    """

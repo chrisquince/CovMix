@@ -1,0 +1,148 @@
+include: "common.snake"
+
+wildcard_constraints:
+    amp = "|".join(AMPLICONS),
+    sample = "|".join(SAMPLES)
+
+# --------------------------------------------------
+# ---------------- Snakemake start! ----------------
+# --------------------------------------------------
+
+rule results:
+    input: expand("%s/samples/{sample}/amplicon_wise_read_cnt.pdf"%EXEC_DIR,sample=SAMPLES),
+           "%s/amp_name_mapping.tsv"%DB_AMP,
+           "%s/refs/%s_amps_seqs/tidy_done"%(EXEC_DIR,PRIMER)
+
+
+# --------------- cut refferences amplicon-wise ------------------------
+# build the tree
+rule mafft_tree:
+    threads: THREADS
+    output: DB_MSA
+    shell: "mafft --auto --thread {threads} {DB_REP} > {output}"
+
+# build amplicon wise database
+rule extract_amplicons:
+    input: msa = DB_MSA,
+    output: expand("%s/{amp}.fa"%DB_AMP,amp=AMPLICONS),
+            "%s/amp_name_mapping.tsv"%DB_AMP,
+            "%s/refs/db_stat.tsv"%EXEC_DIR,
+            "%s/refs/db_snv.tsv"%EXEC_DIR
+    shell: """
+        {SCRIPTS}/extract_amplicons.py {DB_PRIMER} {input.msa} {DB_AMP} -s {EXEC_DIR}/refs  """
+
+
+# just symlink all relevant files in the refs folder.
+rule create_tidy_ref_folder:
+    input:"%s/amp_name_mapping.tsv"%DB_AMP
+    output: "%s/refs/{PRIMER}_amps_seqs/tidy_done"%EXEC_DIR
+    shell:"""
+        mkdir -p {EXEC_DIR}/refs
+        ln -sf {DB_PRIMER} {EXEC_DIR}/refs/
+        ln -sf {DB_REF} {EXEC_DIR}/refs/        
+        if [ ! -f {EXEC_DIR}/refs/genomes_database.fa ]
+            then
+                ln -sf {DB_REP} {EXEC_DIR}/refs/
+        fi
+        if [ ! -d {EXEC_DIR}/refs/{PRIMER}_amps_seqs ]
+        then
+            mkdir -p {EXEC_DIR}/refs/{PRIMER}_amps_seqs
+            ln -sf {DB_AMP}/* {EXEC_DIR}/refs/{PRIMER}_amps_seqs/
+        fi
+        if [ ! -f {EXEC_DIR}/refs/tree/db_tree.nwk ]
+        then  
+            if [ -f {DB_TREE} ]
+            then
+                mkdir -p {EXEC_DIR}/refs/tree
+                ln -sf {DB_TREE} {EXEC_DIR}/refs/tree/db_tree.nwk
+            fi
+        fi
+        touch {output}
+        """
+
+# --------------- map reads to reference ------------------------
+
+rule index :
+    input: "{path}" 
+    output:"{path}.pac"
+    shell: "bwa index {input}"
+
+if DATATYPE=="p-reads":
+
+    rule map_init:
+        input: "%s.pac"%DB_REF,
+               R1 = lambda w:R1[w.sample],
+               R2 = lambda w:R2[w.sample],
+        output: "{path}/{sample}/{sample}_init.sam"
+        log: "{path}/{sample}/{sample}_map_init.log"
+        shell:"bwa mem {DB_REF} {input.R1} {input.R2} 2>{log} | samtools sort -n - -o {output}"
+
+    # !!!ISSUE!!! : this script depends on LEFT/RIGTH tags in the primer bed file...
+    rule filt_sam :
+        input: sam = "{path}/{sample}/{sample}_init.sam",
+        params: "{path}/{sample}/amplicons_reads/{sample}",
+        log: "{path}/{sample}/trim.log"
+        output: files_R1 = expand("{{path}}/{{sample}}/amplicons_reads/{{sample}}_{amp}_{R}.fastq.gz",amp=AMPLICONS,R=["R1","R2"]),
+                amp_tabl = "{path}/{sample}/{sample}_amp_cnt_init.tsv"
+        shell: """
+            {SCRIPTS}/trim_primer_parts.py {input.sam} {DB_PRIMER} {params} --table {output.amp_tabl} --log {log}
+            """
+
+    rule cat_trimmed_files :
+        input: fq = expand("{{path}}/{{sample}}/amplicons_reads/{{sample}}_{amp}_{{R}}.fastq.gz",amp=AMPLICONS)
+        params: "{path}/{sample}/amplicons_reads/",
+        output: "{path}/{sample}/{sample}_trimmed_{R}.fastq.gz"
+        message: "concatenation of all trimmed sequences"
+        shell: """
+               cat {input.fq} > {output}
+               """
+
+    rule map_trimmed:
+        input: R1 = "{path}/{sample}/{sample}_trimmed_R1.fastq.gz",
+               R2 = "{path}/{sample}/{sample}_trimmed_R2.fastq.gz",
+        output: "{path}/{sample}/{sample}_trimmed.sam"
+        log: "{path}/{sample}/bwa_trim.log"
+        shell:"bwa mem {DB_REF} {input.R1} {input.R2} 2>{log} | samtools sort - -o {output}"
+
+else:
+    rule map_init:
+        input: reads = lambda w:SAMPLES[w.sample],
+        output: "{path}/{sample}/{sample}_init.sam"
+        threads: 10
+        shell:"minimap2  -t {threads} -ax map-ont {DB_REF} {input.reads} -a | samtools sort - -o {output}"
+
+    rule filt_sam :
+        input: sam = "{path}/{sample}/{sample}_init.sam",
+        params: "{path}/{sample}/amplicons_reads/{sample}",
+        log: "{path}/{sample}/trim.log"
+        output: files= expand("{{path}}/{{sample}}/amplicons_reads/{{sample}}_{amp}.fastq.gz",amp=AMPLICONS),
+                amp_tabl = "{path}/{sample}/{sample}_amp_cnt_init.tsv"
+        shell: """
+            {SCRIPTS}/trim_primer_parts.py {input.sam} {DB_PRIMER} {params} --table {output.amp_tabl} --log {log} --datatype ont
+            """
+
+    rule cat_trimmed_files :
+        input: fq = expand("{{path}}/{{sample}}/amplicons_reads/{{sample}}_{amp}.fastq.gz",amp=AMPLICONS)
+        params: "{path}/{sample}/amplicons_reads/",
+        output: "{path}/{sample}/{sample}_trimmed.fastq.gz"
+        shell: """
+               cat {input.fq} > {output}
+               """
+
+    rule map_trimmed:
+        input: reads = "{path}/{sample}/{sample}_trimmed.fastq.gz"
+        output: "{path}/{sample}/{sample}_trimmed.sam"
+        threads: 10
+        shell:"minimap2 -t {threads} -ax map-ont {DB_REF} {input.reads} -a | samtools sort - -o {output}"
+
+rule resort_init_sam:
+    input: "{path}_init.sam"
+    output: "{path}_init_sorted.sam"
+    shell: "samtools sort {input} > {output}"
+
+rule plot_cov :
+    input: "{path}/samples/{sample}/{sample}_init_sorted.sam",
+           "{path}/samples/{sample}/{sample}_trimmed.sam"
+    output: "{path}/samples/{sample}/amplicon_wise_read_cnt.pdf"
+    threads: 1
+    shell : "{SCRIPTS}/plot_depth.py -o {output} -i {input} -p {DB_PRIMER} -t {threads}"

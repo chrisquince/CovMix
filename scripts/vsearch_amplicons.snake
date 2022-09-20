@@ -1,0 +1,45 @@
+include: "common.snake"
+
+
+SAMPLE = config["SAMPLE"]
+
+
+wildcard_constraints:
+    amp ="|".join(AMPLICONS),
+    sample = SAMPLE
+
+# --------------------------------------------------
+# ---------------- Snakemake start! ----------------
+# --------------------------------------------------
+
+rule results:
+    input: "%s/samples/%s/amplicons_reads/.cleaning.done"%(EXEC_DIR,SAMPLE)
+
+# ---------------------- run vsearch ----------------------------
+if DATATYPE=="p-reads":
+    rule process_amplicon:
+        input: expand("{{path}}_{{amp}}_{R}.fastq.gz",R=["R1","R2"]),
+               db = "%s/{amp}.fa"%DB_AMP,
+        output: sam = "{path}_{amp}.sam",
+                m6 = "{path}_{amp}.m6"
+        params: root = "{path}_{amp}"
+        shell: "{SCRIPTS}/process_amplicon.py {params.root} {DATATYPE} {MIN_DEREPLICATED_CNT} {input.db} {MIN_PID}"
+else:
+    rule process_amplicon:
+        input: "{path}_{amp}.fastq.gz",
+               db = "%s/{amp}.fa"%DB_AMP,
+        output: sam = "{path}_{amp}.sam",
+                m6 = "{path}_{amp}.m6"
+        params: root = "{path}_{amp}"
+        shell: "{SCRIPTS}/process_amplicon.py {params.root} {DATATYPE} {MIN_DEREPLICATED_CNT} {input.db} {MIN_PID}"
+
+# -------------------------- clean amplicon_wise files ----------------------
+rule clean_data:
+    input: cnt = expand("{{path}}/amplicons_reads/%s_{amp}.m6"%SAMPLE,amp=AMPLICONS)
+    output: "{path}/amplicons_reads/.cleaning.done"
+    params: "{path}/amplicons_reads"
+    shell: """
+    rm {params}/*.gz || touch {output}
+    touch {output}
+    """
+

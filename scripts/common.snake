@@ -1,0 +1,140 @@
+from common import *
+from os.path import abspath, realpath, dirname, basename, exists, getsize
+from Bio.SeqIO.QualityIO import FastqGeneralIterator as fgi
+from Bio.SeqIO.FastaIO import SimpleFastaParser as sfp
+from collections import defaultdict
+import numpy as np
+import hashlib
+import glob
+import gzip
+import sys
+import os
+
+
+
+# get defaults values 
+fill_default_values(config)
+
+# -------- Ressources --------
+THREADS = config["threads"]
+SCRIPTS = config["scripts"]
+CONFIG_PATH = config["CONFIG_PATH"]
+REPOS_DIR = config["REPOS_DIR"]
+EXEC_DIR = config["EXEC_DIR"]
+
+# -------- References/DB --------
+PRIMER = config["PRIMER"]
+DB_REF = "%s/primer_schemes/%s/%s_reference.fasta"%(REPOS_DIR,PRIMER,PRIMER) # ref for reference, basically the genome used for primer definition
+DB_PRIMER = "%s/primer_schemes/%s/%s_primer.bed"%(REPOS_DIR,PRIMER,PRIMER)
+DB_REP = config["database"]["fasta"] # rep for representatives, basically the covid genomes database
+
+# ----------------- Amplicons -------------
+# !!!ISSUE!!! currently dependent on artic type amplicon naming scheme, not sure how to adapt to general naming scheme. 
+AMPLICONS = {line.rstrip().split("\t")[3].split("_RIGHT")[0].split("_LEFT")[0] for line in open(DB_PRIMER)}
+
+# if pipe has been run previously RELEVANT_AMP is the list of selected amp to run for each sample
+# otherwise just a placeholder so that the snaekamke doesn't crash by trying to make sense of an unknown variable
+amp_selected = "%s/selected_amp.tsv"%EXEC_DIR
+if exists(amp_selected):
+    RELEVANT_AMP = {line.rstrip().split("\t")[0]:line.rstrip().split("\t")[1:] for line in open(amp_selected)}
+else:
+    RELEVANT_AMP = defaultdict(lambda:list(AMPLICONS))
+
+
+# -------- Additional parameters --------
+TRIMMING_LEVEL = config["trimming_strictness"]
+THRESHOLD = config["Proportion_Threshold"]
+DB_MSA = config["database"]["msa"]
+DB_TREE = config["database"]["tree"]
+DB_TREE_REL = config["database"]["tree_rel"]
+DB_AMP = config["database"]["amplicons"]
+MAX_READS = config["max_reads_per_amp"]
+MIN_READS = config["min_reads_per_amp"]
+MIN_DEREPLICATED_CNT = config["min_dereplicated_count"] # default value is 2, to remove singletons
+MIN_PID = 0.95
+MIN_CNT = 10
+PLOT_TREE = config["plot_tree"]
+
+# --------- READS TYPE ------------
+DATATYPE = config["DATATYPE"] # either ont or p-reads
+
+# -------- Database --------
+# we make the assumption that the database contain the sequence used for defining primer
+# if it's not in, we add it.
+refname,refseq = next(sfp(open(DB_REF))) 
+if not refname in {header for header,seq in sfp(open(DB_REP))}:
+    new_db = "%s/refs/genomes_database.fa"%EXEC_DIR
+    os.system("mkdir -p %s/refs"%EXEC_DIR)
+    os.system("cat %s %s > %s"%(DB_REP,DB_REF,new_db))
+    DB_REP = new_db
+
+if DB_MSA!="%s/refs/tree/db_mafft.msa"%EXEC_DIR:
+    if not exists("%s/refs/tree/db_mafft.msa"%EXEC_DIR):
+        # check that all element of ref can be found in the .msa
+        headers_msa = {header.split(" ")[0] for header,_ in sfp(open(DB_MSA))}
+        header_db = {header.split(" ")[0] for header,_ in sfp(open(DB_REP))}
+        assert(header_db-headers_msa==set()),"Given multi alignement of the database is missing some entries, see for instance %s"%"\t".join(list(header_db-headers_msa))
+        os.system("mkdir -p %s/refs/tree"%EXEC_DIR)
+        os.system("ln -s %s %s/refs/tree/db_mafft.msa"%(DB_MSA,EXEC_DIR))
+        DB_MSA = "%s/refs/tree/db_mafft.msa"%EXEC_DIR
+
+# -------- filtering --------
+# TODO check validity of passed files
+# default is to run all amplicons
+if config["amplicon_to_run"]:
+    DB_RUN_A = config["amplicon_to_run"]
+else:
+    DB_RUN_A = ""
+
+# default is to run all genomes
+if config["genome_to_run"]:
+    DB_RUN_G = config["genome_to_run"]
+else:
+    DB_RUN_G = ""
+
+
+# -------- Samples --------
+SAMPLE_DIR = config["data"]
+try : 
+    REGEX = config["data_regex"]
+except:
+    REGEX = ["*"]
+
+SAMPLES = {basename(file):detect_reads(file) for regex in REGEX for file in extended_glob("%s/%s"%(SAMPLE_DIR,regex))}
+SAMPLES = {sample:files for sample,files in SAMPLES.items() if files}
+
+if len(RELEVANT_AMP)!=0:
+    SAMPLES = {key:val for key,val in SAMPLES.items() if key in RELEVANT_AMP}
+
+# check there is only 1 R1 and 1 R2 per folder
+if DATATYPE=="p-reads":
+    assess_samples(SAMPLES)
+    R1 = {sample:files["_R1" in files[1]] for sample,files in SAMPLES.items()}
+    R2 = {sample:files["_R2" in files[1]] for sample,files in SAMPLES.items()}
+else: 
+    assess_nanopore_samples(SAMPLES)
+    SAMPLES = {sample:files[0] for sample,files in SAMPLES.items()}
+
+
+
+# ------ FIG to generate ---------
+# mostly generate everything but maybe not the phylogenetique tree next to the proportion histogram.
+FIGS = ["Proportions","amplicons_wise_freq","amplicon_wise_read_cnt"]+["tree_freq"]*PLOT_TREE
+
+
+
+# --------- util functions depending on params ---------
+def generate_header():
+    # we did a sam file concatenation, it's shit for headers,
+    # let's look at what it should be and generate some correct ones
+    # see that for md5 in python https://stackoverflow.com/questions/3431825/generating-an-md5-checksum-of-a-file
+    def md5(seq):
+        return hashlib.md5(seq.encode('utf-8')).hexdigest()
+
+    refname,seq = next(sfp(open(DB_REF)))
+    header=[]
+    header.append(["@HD","VN:1.0","SO:unsorted","GO:query"])
+    header.append(["@SQ","SN:%s"%refname,"LN:%s"%len(seq),"M5:%s"%md5(seq),"UR:file:%s"%DB_REF]) 
+    header.append(["@PG","ID:vsearch","VN:2.17.1","CL:vsearch --threads 10 --usearch_global sample --db %s --samout samfile --samheader --id %s"%(refname,MIN_PID)])
+    return header
+

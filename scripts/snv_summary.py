@@ -217,7 +217,7 @@ for index_page in range(0,len(sorted_sample),3):
         plot_num = 311+nb_fig
         # plot corresponding dmags
         index_tot = index_page+nb_fig
-        if (index_tot+1)>=len(sorted_sample):
+        if (index_tot+1)>len(sorted_sample):
             continue
         plt.subplot(plot_num)
 

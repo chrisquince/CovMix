@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from os.path import abspath, realpath, dirname, basename, exists
-from scripts.common import fill_default_values, cd 
+from scripts.common import *
 from subprocess import PIPE,Popen
 from psutil import virtual_memory
 import subprocess
@@ -24,7 +24,8 @@ parser.add_argument("--verbose", "-v", action="store_true", help="Increase verbo
 parser.add_argument("--dryrun", "-n", action="store_true", help="Show tasks, do not execute them")
 parser.add_argument("--unlock", "-u", action="store_true", help="Unlock the directory")
 parser.add_argument("--touch", "-t", action="store_true", help="Touch all files, to reset timestamp and stop unwanted/uncalled snakemake reruns")
-parser.add_argument("--dag", "-d", help="file where you want the dag to be stored")
+parser.add_argument("--dag", "-d", help="file where you want the dag to be stored",default="")
+parser.add_argument("--mode", "-m", help="optionally run a unique part of the pipeline",choices=["all","map","amplicons","em","snv"],default="all")
 parser.add_argument('-s', nargs=argparse.REMAINDER,help="Pass additional argument directly to snakemake")
 args = parser.parse_args()
 
@@ -40,8 +41,8 @@ EXEC_DIR = abspath(realpath(config["execution_directory"]))
 os.system("mkdir -p %s"%EXEC_DIR)
 
 # ------- base parameters used to call snakemake -----------
-base_params = ["snakemake", "--directory", EXEC_DIR, "--cores", str(args.cores), "--config", "REPOS_DIR=%s"%REPOS_DIR,"PRIMER=%s"%args.primer,"CONFIG_PATH=%s"%CONFIG_FILE,"EXEC_DIR=%s"%EXEC_DIR,"DATATYPE=%s"%args.datatype,"--configfile="+CONFIG_FILE, "--latency-wait", "120","-k","--use-conda"]
-
+base_params = ["snakemake", "--directory", EXEC_DIR, "--cores", str(args.cores), "--configfile="+CONFIG_FILE, "--latency-wait", "120","-k","--use-conda"]
+config_args = ["--config", "REPOS_DIR=%s"%REPOS_DIR,"PRIMER=%s"%args.primer,"CONFIG_PATH=%s"%CONFIG_FILE,"EXEC_DIR=%s"%EXEC_DIR,"DATATYPE=%s"%args.datatype]
 # ------- additional parameters -----------
 if args.verbose:
     base_params.extend(["-p", "-r", "--verbose"]) 
@@ -51,47 +52,61 @@ if args.unlock:
     base_params.extend(["--unlock"])
 if args.touch:
     base_params.extend(["-t"])    
-if args.dag:
-    base_params.extend(["--rulegraph"])
 if args.s :
     base_params.extend(args.s)
     NOTHING_ELSE = 1
 else:
     NOTHING_ELSE = 0
 
+# -------- Samples --------
+SAMPLE_DIR = config["data"]
+try : 
+    REGEX = config["data_regex"]
+except:
+    REGEX = ["*"]
 
-# ------- call snakemake from  METAHOOD_DIR -----------
+SAMPLES = {basename(file):detect_reads(file) for regex in REGEX for file in extended_glob("%s/%s"%(SAMPLE_DIR,regex))}
+SAMPLES = {sample:files for sample,files in SAMPLES.items() if files}
+
+# check there is only 1 R1 and 1 R2 per folder
+if args.datatype=="p-reads":
+    assess_samples(SAMPLES)
+    R1 = {sample:files["_R1" in files[1]] for sample,files in SAMPLES.items()}
+    R2 = {sample:files["_R2" in files[1]] for sample,files in SAMPLES.items()}
+else: 
+    assess_nanopore_samples(SAMPLES)
+    SAMPLES = {sample:files[0] for sample,files in SAMPLES.items()}
+
+# ---------------------------------------------------------------
+# ---------------------    Main pipeline    ---------------------
+# ---------------------------------------------------------------
+mode = args.mode
+# cd allow to work in the correct dir 
 with cd(REPOS_DIR):
-    def call_snake(extra_params=[]):
-        call_snake.nb+=1
-        if args.dag:
-            p1=Popen(base_params + extra_params, stdout=PIPE, stderr=sys.stderr)
-            p2=Popen(["dot","-Tpng"],stdin=p1.stdout, stdout=PIPE, stderr=sys.stderr)
-            with open(args.dag.replace(".png",str(call_snake.nb)+".png"),"bw") as f :
-                f.write(p2.communicate()[0])
-        else :
-            subprocess.check_call(base_params + extra_params, stdout=sys.stdout, stderr=sys.stderr)
-    call_snake.nb=0
-    # so to remove checkpoint the pipeline is separated in 2 bits: 
-    # first trim and select amp to run
-    if NOTHING_ELSE:
-        objective = []
-    else:
-        objective = ["%s/selected_amp.tsv"%EXEC_DIR]
+    call_snake.nb=0 # thing for dag pic generation
+    
+    # start by parallel mapping all samples to ref
+    if (mode=="all")|(mode=="map"):
+        call_snake(base_params+["--snakefile", "scripts/map_to_ref.snake"]+config_args,"Mapping samples to database")
+    
+    # go back to sample wise processing
+    if (mode=="all")|(mode=="amplicons"):
+        for index,sample in enumerate(SAMPLES):
+            call_snake(base_params+["--snakefile", "scripts/vsearch_amplicons.snake"]+config_args+["SAMPLE=%s"%sample],"Amplicon-wise global alignemnt for sample %s (%s/%s)"%(sample, index+1, len(SAMPLES)))
+    
+    # assess relevant amp/sample, over all samples
+    if (mode=="all")|(mode=="em"):
+        call_snake(base_params+["--snakefile", "scripts/EM_results.snake"]+[f"{EXEC_DIR}/selected_amp.tsv"]+config_args,"Assessing amplicons and samples to run")
 
-    call_snake(["--snakefile", "scripts/main_pipe.snake"]+objective)
-    # Then run regular EM, snv as well as varscan
-    call_snake(["--snakefile", "scripts/main_pipe.snake" ])
+        # recall the same snake but this time for launching all EM and such.
+        call_snake(base_params+["--snakefile", "scripts/EM_results.snake"]+config_args,"Running EM algorithm, it may take some times")
 
+    # do some additional snv analysis
+    if (mode=="all")|(mode=="snv"):
+        call_snake(base_params+["--snakefile", "scripts/snv.snake"]+config_args,"SNV analysis")
 
-
-
-
-
-
-
-
-
+    print('-'*80)
+    print("\n\n                  We are done here,\n\n                  ~ bye now\n\n")
 
 
 
