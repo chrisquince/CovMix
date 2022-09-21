@@ -289,7 +289,7 @@ posbase_cnts = {(pos,base):(freq*pos_cnts[pos]).astype(int) for (pos,base),freq 
 
 # plot output
 results = []
-pdf = matplotlib.backends.backend_pdf.PdfPages("%s/snv/snv_plot.pdf"%ROOT)
+pdf = matplotlib.backends.backend_pdf.PdfPages("%s/results/snv_plot.pdf"%ROOT)
 for index_page in range(0,len(sorted_sample),3):
     fig = plt.figure(figsize=(10, 10))
     for nb_fig in range(3):
