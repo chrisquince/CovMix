@@ -114,6 +114,7 @@ rule plot_and_snv_table:
     input: "{path}/snv/count.csv",
            "{path}/refs/db_snv.tsv",
            "{path}/results/proportions.tsv",
+           expand("%s/samples/{sample}/varscan/{sample}_snv.tsv"%EXEC_DIR,sample=SAMPLES)
     output: "{path}/snv/snv_table.tsv"
     shell: "{SCRIPTS}/snv_summary.py {EXEC_DIR}"
 
