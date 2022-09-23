@@ -4,6 +4,7 @@ from Bio.SeqIO.QualityIO import FastqGeneralIterator as fgi
 from Bio.SeqIO.FastaIO import SimpleFastaParser as sfp
 from collections import defaultdict
 import numpy as np
+import traceback
 import hashlib
 import glob
 import gzip
