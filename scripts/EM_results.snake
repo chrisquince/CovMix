@@ -137,13 +137,10 @@ rule Pi_overall_table:
     log: "{path}/logs/Pi_overall_table.log"
     run:
         try:
-            refs = {line.rstrip().split("\t")[0] for index,line in enumerate(open(input["refs"])) if index>0}
             sample_to_file = {basename(file).replace("_total_pi_est.csv",""):file for file in input["pi"]}
             # some bad runs don't really have a filtered output since there is nothing left after filtering, we require the output of CovidEM_VIN to be only total_pi_est instead of total_Filt_pi_est but then when possible use the Filtered output 
             sample_to_file = {sample:file.replace("total_","total_Filt_") if os.path.exists(file.replace("total_","total_Filt_")) else file for sample,file in sample_to_file.items()}
-            sorted_refs = sorted(refs)
             sorted_samples = sorted(sample_to_file)
-
 
             # get mapping of ref to representative
             sample_ref_to_rep = defaultdict(dict)
@@ -161,13 +158,18 @@ rule Pi_overall_table:
                     for member in members:
                         sample_ref_to_rep[sample][member] = representative
 
+            # get number of refs
+            # using db stats is useles because of potential DB_RUN_G, instead look at ambiguity map from CovidEM_VIN_U2
+            sorted_refs = sorted(set().union(*list(sample_ref_to_rep.values())))
+            assert len(Counter(map(len,sample_ref_to_rep.values())))==1, "database length seems to be different in different samples? Why would you do that?"
+
             # build a degneracy matrix
             degen_mat = [["/"]+sorted_refs]
             for sample in sorted_samples:
                 degen_mat.append([sample]+[sample_ref_to_rep[sample][ref] for ref in sorted_refs])
 
             # build a matrix
-            mat = np.zeros((len(sorted_samples),len(refs)))
+            mat = np.zeros((len(sorted_samples),len(sorted_refs)))
             for index,sample in enumerate(sorted_samples):
                 with open(sample_to_file[sample]) as handle:
                     _=next(handle)
