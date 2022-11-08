@@ -175,8 +175,9 @@ rule Pi_overall_table:
                     _=next(handle)
                     for line in handle:
                         _,ref,percent,std = line.rstrip().split(",")
+                        nb_ambiguous_rep = len(sample_rep_to_ref[sample][ref])
                         for member in sample_rep_to_ref[sample][ref]:
-                            mat[index,sorted_refs.index(member)]=float(percent)
+                            mat[index,sorted_refs.index(member)]=float(percent)/float(nb_ambiguous_rep)
 
             # write a matrix
             matrix_write(mat,output["prop"],sorted_samples,sorted_refs)
