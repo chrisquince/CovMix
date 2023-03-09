@@ -11,7 +11,15 @@ import gzip
 import sys
 import os
 
-
+# degug
+# import yaml
+# from yaml import CLoader as Loader, CDumper as Dumper
+# config = yaml.load(open("../nanopore/propmix2_config_020223.yaml"), Loader=Loader)
+# config["REPOS_DIR"] = "/mnt/gpfs2/seb/Project/CovMix"
+# config["CONFIG_PATH"] = '../nanopore/propmix2_config_020223.yaml'
+# config["EXEC_DIR"]=config["execution_directory"]
+# config["PRIMER"]="Artic_V4-6"
+# config["DATATYPE"]="ont"
 
 # get defaults values 
 fill_default_values(config)

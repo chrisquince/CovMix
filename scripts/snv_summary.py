@@ -63,12 +63,16 @@ def get_coord(BED_FILE,amp_list):
     return list(union(ranges))
 
 def degeneracy(mat,variants,sorted_sample):
-    degen_summary = {(line.rstrip().split("\t")[0],line.rstrip().split("\t")[1]):line.rstrip().split("\t")[2].split("|----|") for index,line in enumerate(open("%s/results/degen_summary.tsv"%ROOT)) if index>0} 
-    degen_summary = {(sample):[el for el in val if el!=rep] for (sample,rep),val in degen_summary.items()}
+    degen_summary = {(line.rstrip().split("\t")[0],line.rstrip().split("\t")[1]):line.rstrip().split("\t")[2].split("|----|") for index,line in enumerate(open("%s/results/degen_summary.tsv"%ROOT)) if index>0}
+    degen_summary2 = defaultdict(dict)
+    for (sample,ref),var in degen_summary.items():
+        degen_summary2[sample][ref]=[el for el in var if el!=ref]
     variants_index = {var:index for index,var in enumerate(variants)}
     for index,sample in enumerate(sorted_sample):
-        for variant in degen_summary[(sample)]:
-            mat[index,variants_index[variant]]=0
+        for ref,var in degen_summary2[sample].items():
+            var_indexes = np.array([variants_index[v] for v in var])
+            mat[index,variants_index[ref]]+=sum(mat[index,var_indexes])
+            mat[index,var_indexes] = 0
     return mat
 
 
@@ -219,6 +223,10 @@ def sample_wise_data(sample_index,posbase_cnts,posbase_cnts_observed,posbase_fil
     color +=list(range(len(sorted_cases)))
 
     # create data 
+    # note for debug:
+    # snv_variants = snv from database
+    # posbase_filt = snv predicted filetered
+    # posbase_cnts = snv predicted but not filtered
     data = []
     for combi in sorted_combi:
         pos,base = combi
@@ -280,10 +288,16 @@ posbase_percent = get_pos_base_percent(ROOT,prprt)
 # get observed counts
 posbase_cnts_observed,pos_cnts = get_observed_snv(ROOT,sorted_sample)
 
-issue = {combi for combi,values in  posbase_cnts_observed.items() if sum(pos_cnts[combi[0]]-values)>0}
-
 # translate snv proportion in to countgs
 posbase_cnts = {(pos,base):(freq*pos_cnts[pos]).astype(int) for (pos,base),freq in posbase_percent.items()}
+
+
+
+# bug = {(pos,base) for (pos,base) in posbase_filt.keys() if (pos,base) not in posbase_percent}
+# bug = {(pos,base) for (pos,base) in posbase_percent.keys() if (pos,base) not in posbase_filt}
+# snv_variants = snv from database
+# posbase_filt = snv predicted filetered
+# posbase_cnts = snv predicted but not filtered
 
 
 

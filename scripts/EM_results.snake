@@ -161,12 +161,12 @@ rule Pi_overall_table:
             # get number of refs
             # using db stats is useles because of potential DB_RUN_G, instead look at ambiguity map from CovidEM_VIN_U2
             sorted_refs = sorted(set().union(*list(sample_ref_to_rep.values())))
-            assert len(Counter(map(len,sample_ref_to_rep.values())))==1, "database length seems to be different in different samples? Why would you do that?"
+            # assert len(Counter(map(len,sample_ref_to_rep.values())))==1, "database length seems to be different in different samples? Why would you do that?"
 
             # build a degneracy matrix
             degen_mat = [["/"]+sorted_refs]
             for sample in sorted_samples:
-                degen_mat.append([sample]+[sample_ref_to_rep[sample][ref] for ref in sorted_refs])
+                degen_mat.append([sample]+[sample_ref_to_rep[sample][ref] for ref in sorted_refs] if ref in sample_ref_to_rep[sample])
 
             # build a matrix
             mat = np.zeros((len(sorted_samples),len(sorted_refs)))
