@@ -7,10 +7,9 @@ CovMix is a pipeline developed for inferring  SARS-CoV-2 variant proportions fro
 **What does the  pipeline do :**
 1) Read primer removal/trimming/filtering
 2) Demultiplexing by amplicon
-3) Merging of reads
-4) Per amplicon global alignement 
-5) EM algorithm to infer proportions
-![alt tag](figs/workflow.png)
+3) Per amplicon global alignement 
+4) EM algorithm to infer proportions
+![alt tag](figs/covmix_fig.pdf)
 Numbers on this figure result from the specific usage of  a 1234 genome database with the Artic_V3 primer scheme. 
 
 ###  How to install CovMix:
