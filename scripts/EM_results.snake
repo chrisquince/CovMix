@@ -166,7 +166,7 @@ rule Pi_overall_table:
             # build a degneracy matrix
             degen_mat = [["/"]+sorted_refs]
             for sample in sorted_samples:
-                degen_mat.append([sample]+[sample_ref_to_rep[sample][ref] for ref in sorted_refs] if ref in sample_ref_to_rep[sample])
+                degen_mat.append([sample]+[sample_ref_to_rep[sample][ref] for ref in sorted_refs if ref in sample_ref_to_rep[sample]])
 
             # build a matrix
             mat = np.zeros((len(sorted_samples),len(sorted_refs)))
